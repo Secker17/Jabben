@@ -1,0 +1,15 @@
+{
+  "short_name": "Julian Bjørgen",
+  "name": "Julian Bjørgen — Photographer",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#090a09",
+  "background_color": "#090a09"
+}

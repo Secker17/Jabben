@@ -1,0 +1,99 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function ownsExistingPhoto() {
+      return signedIn() && resource.data.uploadedBy == request.auth.uid;
+    }
+
+    function validPhoto() {
+      return request.resource.data.keys().hasAll([
+          'title',
+          'alt',
+          'category',
+          'year',
+          'featured',
+          'published',
+          'url',
+          'imageUrl',
+          'storagePath',
+          'fileName',
+          'contentType',
+          'size',
+          'uploadedBy',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'title',
+          'alt',
+          'category',
+          'year',
+          'featured',
+          'published',
+          'url',
+          'imageUrl',
+          'storagePath',
+          'fileName',
+          'contentType',
+          'size',
+          'uploadedBy',
+          'createdAt'
+        ])
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.title.size() <= 100
+        && request.resource.data.alt is string
+        && request.resource.data.alt.size() > 0
+        && request.resource.data.alt.size() <= 180
+        && request.resource.data.category is string
+        && request.resource.data.category.size() > 0
+        && request.resource.data.category.size() <= 50
+        && request.resource.data.year is int
+        && request.resource.data.year >= 1900
+        && request.resource.data.year <= 2200
+        && request.resource.data.featured is bool
+        && request.resource.data.published is bool
+        && request.resource.data.url is string
+        && request.resource.data.url.size() > 0
+        && request.resource.data.imageUrl == request.resource.data.url
+        && request.resource.data.storagePath is string
+        && request.resource.data.fileName is string
+        && request.resource.data.contentType.matches('image/(jpeg|png|webp|avif)')
+        && request.resource.data.size is int
+        && request.resource.data.size > 0
+        && request.resource.data.size <= 15 * 1024 * 1024
+        && request.resource.data.uploadedBy is string;
+    }
+
+    match /photos/{photoId} {
+      allow get: if resource.data.published == true || ownsExistingPhoto();
+      allow list: if resource.data.published == true || ownsExistingPhoto();
+
+      allow create: if signedIn()
+        && validPhoto()
+        && request.resource.data.uploadedBy == request.auth.uid
+        && request.resource.data.storagePath.matches(
+          'photos/' + request.auth.uid + '/.*'
+        )
+        && request.resource.data.createdAt == request.time;
+
+      allow update: if ownsExistingPhoto()
+        && validPhoto()
+        && request.resource.data.uploadedBy == resource.data.uploadedBy
+        && request.resource.data.storagePath == resource.data.storagePath
+        && request.resource.data.url == resource.data.url
+        && request.resource.data.createdAt == resource.data.createdAt;
+
+      allow delete: if ownsExistingPhoto();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
