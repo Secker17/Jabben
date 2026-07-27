@@ -15,13 +15,13 @@ test('renders the Julian Bjørgen identity and primary navigation', async () => 
   expect(screen.getByRole('link', { name: 'Contact' })).toBeInTheDocument();
 });
 
-test('shows the safe Firebase setup state on the private Studio route', async () => {
+test('renders the private Studio route shell', async () => {
   window.history.pushState({}, '', '/studio');
   render(<App />);
 
   expect(
-    await screen.findByRole('heading', {
-      name: /the studio is ready\. firebase needs setup\./i,
+    await screen.findByRole('link', {
+      name: /julian bjørgen .* return to the home page/i,
     }),
   ).toBeInTheDocument();
 });
