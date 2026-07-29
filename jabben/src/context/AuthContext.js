@@ -1,8 +1,11 @@
 import {
+  EmailAuthProvider,
   onAuthStateChanged,
+  reauthenticateWithCredential,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut,
+  updatePassword,
 } from 'firebase/auth';
 import {
   createContext,
@@ -13,8 +16,23 @@ import {
   useState,
 } from 'react';
 import { auth, firebaseConfigured } from '../lib/firebase';
+import {
+  bootstrapStudioOwner as bootstrapOwner,
+  createStudioUser as provisionStudioUser,
+  getStudioUserAccess,
+  isConfiguredStudioOwner,
+  listStudioUsers as listProvisionedStudioUsers,
+  subscribeToStudioUserAccess,
+  updateStudioUserAccess as updateProvisionedStudioUserAccess,
+} from '../services/userAdminService';
 
 const AuthContext = createContext(null);
+const emptyClaims = Object.freeze({
+  role: 'none',
+  admin: false,
+  studio: false,
+  enabled: false,
+});
 
 const configurationError = () => {
   const error = new Error(
@@ -24,8 +42,15 @@ const configurationError = () => {
   return error;
 };
 
+const accessError = (message) => {
+  const error = new Error(message);
+  error.code = 'auth/unauthenticated';
+  return error;
+};
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
+  const [claims, setClaims] = useState(emptyClaims);
   const [loading, setLoading] = useState(firebaseConfigured);
 
   useEffect(() => {
@@ -34,32 +59,113 @@ export function AuthProvider({ children }) {
       return undefined;
     }
 
+    let active = true;
     let resolved = false;
+    let sequence = 0;
+    let unsubscribeFromAccess = null;
     const timeoutId = window.setTimeout(() => {
-      if (!resolved) {
+      if (!resolved && active) {
         setLoading(false);
       }
-    }, 4000);
+    }, 5000);
 
-    const unsubscribe = onAuthStateChanged(
+    const stopAccessSubscription = () => {
+      if (unsubscribeFromAccess) {
+        unsubscribeFromAccess();
+        unsubscribeFromAccess = null;
+      }
+    };
+
+    const unsubscribeFromAuth = onAuthStateChanged(
       auth,
-      (nextUser) => {
-        resolved = true;
-        window.clearTimeout(timeoutId);
-        setUser(nextUser);
-        setLoading(false);
+      async (nextUser) => {
+        const currentSequence = ++sequence;
+        stopAccessSubscription();
+
+        if (!nextUser) {
+          resolved = true;
+          window.clearTimeout(timeoutId);
+
+          if (active && currentSequence === sequence) {
+            setUser(null);
+            setClaims(emptyClaims);
+            setLoading(false);
+          }
+          return;
+        }
+
+        if (active) {
+          setUser(nextUser);
+          setLoading(true);
+        }
+
+        try {
+          let studioAccess = await getStudioUserAccess(nextUser.uid);
+
+          if (
+            !studioAccess &&
+            isConfiguredStudioOwner(nextUser.email)
+          ) {
+            studioAccess = await bootstrapOwner();
+          }
+
+          resolved = true;
+          window.clearTimeout(timeoutId);
+
+          if (!active || currentSequence !== sequence) return;
+
+          setClaims(studioAccess || emptyClaims);
+          setLoading(false);
+
+          unsubscribeFromAccess = subscribeToStudioUserAccess(
+            nextUser.uid,
+            (nextAccess) => {
+              if (active && currentSequence === sequence) {
+                setClaims(nextAccess || emptyClaims);
+              }
+            },
+            (error) => {
+              if (process.env.NODE_ENV !== 'production') {
+                console.warn('Studio access could not be refreshed.', error);
+              }
+
+              if (active && currentSequence === sequence) {
+                setClaims(emptyClaims);
+              }
+            }
+          );
+        } catch (error) {
+          resolved = true;
+          window.clearTimeout(timeoutId);
+
+          if (process.env.NODE_ENV !== 'production') {
+            console.warn('Studio access could not be loaded.', error);
+          }
+
+          if (active && currentSequence === sequence) {
+            setClaims(emptyClaims);
+            setLoading(false);
+          }
+        }
       },
       () => {
         resolved = true;
         window.clearTimeout(timeoutId);
-        setUser(null);
-        setLoading(false);
+        stopAccessSubscription();
+
+        if (active) {
+          setUser(null);
+          setClaims(emptyClaims);
+          setLoading(false);
+        }
       }
     );
 
     return () => {
+      active = false;
       window.clearTimeout(timeoutId);
-      unsubscribe();
+      stopAccessSubscription();
+      unsubscribeFromAuth();
     };
   }, []);
 
@@ -103,16 +209,108 @@ export function AuthProvider({ children }) {
     return sendPasswordResetEmail(auth, normalizedEmail);
   }, []);
 
+  const refreshClaims = useCallback(async () => {
+    const currentUser = auth?.currentUser;
+
+    if (!currentUser) {
+      throw accessError('You must be signed in to refresh access.');
+    }
+
+    let studioAccess = await getStudioUserAccess(currentUser.uid);
+
+    if (
+      !studioAccess &&
+      isConfiguredStudioOwner(currentUser.email)
+    ) {
+      studioAccess = await bootstrapOwner();
+    }
+
+    setClaims(studioAccess || emptyClaims);
+    return studioAccess || emptyClaims;
+  }, []);
+
+  const changePassword = useCallback(
+    async ({ currentPassword, newPassword } = {}) => {
+      const currentUser = auth?.currentUser;
+
+      if (!currentUser?.email) {
+        throw accessError(
+          'You must be signed in with an email account to change your password.'
+        );
+      }
+
+      if (!currentPassword || !newPassword) {
+        const error = new Error(
+          'Enter both your current password and a new password.'
+        );
+        error.code = 'auth/missing-password';
+        throw error;
+      }
+
+      const credential = EmailAuthProvider.credential(
+        currentUser.email,
+        currentPassword
+      );
+      await reauthenticateWithCredential(currentUser, credential);
+      await updatePassword(currentUser, newPassword);
+      await refreshClaims();
+    },
+    [refreshClaims]
+  );
+
+  const createStudioUser = useCallback(
+    async ({ email, password, displayName } = {}) =>
+      provisionStudioUser({ email, password, displayName }),
+    []
+  );
+
+  const listStudioUsers = useCallback(
+    async (options = {}) => listProvisionedStudioUsers(options),
+    []
+  );
+
+  const updateStudioUserAccess = useCallback(
+    async (access = {}) => updateProvisionedStudioUserAccess(access),
+    []
+  );
+
+  const isAdmin = claims.enabled === true && claims.admin === true;
+  const isStudio =
+    claims.enabled === true &&
+    (claims.studio === true || isAdmin);
+
   const value = useMemo(
     () => ({
       user,
+      claims,
       loading,
       configured: firebaseConfigured,
+      isAdmin,
+      isStudio,
       login,
       logout,
       resetPassword,
+      refreshClaims,
+      changePassword,
+      createStudioUser,
+      listStudioUsers,
+      updateStudioUserAccess,
     }),
-    [user, loading, login, logout, resetPassword]
+    [
+      user,
+      claims,
+      loading,
+      isAdmin,
+      isStudio,
+      login,
+      logout,
+      resetPassword,
+      refreshClaims,
+      changePassword,
+      createStudioUser,
+      listStudioUsers,
+      updateStudioUserAccess,
+    ]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -2,93 +2,389 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    function signedIn() {
+    function isSignedIn() {
       return request.auth != null;
     }
 
-    function ownsExistingPhoto() {
-      return signedIn() && resource.data.uploadedBy == request.auth.uid;
+    function isOwnerEmail() {
+      return isSignedIn()
+        && request.auth.token.email == 'bjorgenjulian@gmail.com';
+    }
+
+    function isStudio() {
+      return isSignedIn()
+        && exists(
+          /databases/$(database)/documents/studioUsers/$(request.auth.uid)
+        )
+        && get(
+          /databases/$(database)/documents/studioUsers/$(request.auth.uid)
+        ).data.enabled == true
+        && get(
+          /databases/$(database)/documents/studioUsers/$(request.auth.uid)
+        ).data.disabled == false
+        && (
+          get(
+            /databases/$(database)/documents/studioUsers/$(request.auth.uid)
+          ).data.studio == true
+          || get(
+            /databases/$(database)/documents/studioUsers/$(request.auth.uid)
+          ).data.admin == true
+        );
+    }
+
+    function isAdmin() {
+      return isStudio()
+        && get(
+          /databases/$(database)/documents/studioUsers/$(request.auth.uid)
+        ).data.admin == true;
+    }
+
+    function validStudioUser(userId) {
+      let data = request.resource.data;
+      return data.keys().hasAll([
+          'uid',
+          'email',
+          'displayName',
+          'role',
+          'admin',
+          'studio',
+          'enabled',
+          'disabled',
+          'emailVerified',
+          'isOwner',
+          'createdAt',
+          'updatedAt',
+          'createdBy',
+          'updatedBy'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'email',
+          'displayName',
+          'role',
+          'admin',
+          'studio',
+          'enabled',
+          'disabled',
+          'emailVerified',
+          'isOwner',
+          'createdAt',
+          'updatedAt',
+          'createdBy',
+          'updatedBy',
+          'lastSignInAt'
+        ])
+        && data.uid == userId
+        && data.email is string
+        && data.email.size() > 3
+        && data.email.size() <= 254
+        && data.displayName is string
+        && data.displayName.size() <= 100
+        && data.role in ['none', 'studio', 'admin']
+        && data.admin is bool
+        && data.studio is bool
+        && data.enabled is bool
+        && data.disabled is bool
+        && data.emailVerified is bool
+        && data.isOwner is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && data.createdBy is string
+        && data.updatedBy is string
+        && (!('lastSignInAt' in data) || data.lastSignInAt is timestamp)
+        && (
+          (
+            data.role == 'admin'
+            && data.admin == true
+            && data.studio == true
+            && data.enabled == true
+          )
+          || (
+            data.role == 'studio'
+            && data.admin == false
+            && data.studio == true
+            && data.enabled == true
+          )
+          || (
+            data.role == 'none'
+            && data.admin == false
+            && data.studio == false
+            && data.enabled == false
+          )
+        )
+        && (
+          data.isOwner == false
+          || (
+            data.email == 'bjorgenjulian@gmail.com'
+            && data.role == 'admin'
+            && data.disabled == false
+          )
+        );
+    }
+
+    function validOwnerBootstrap(userId) {
+      let data = request.resource.data;
+      return isOwnerEmail()
+        && request.auth.uid == userId
+        && validStudioUser(userId)
+        && data.email == 'bjorgenjulian@gmail.com'
+        && data.isOwner == true
+        && data.createdBy == request.auth.uid
+        && data.updatedBy == request.auth.uid
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function validOptionalPhotoFields(data) {
+      return (!('artist' in data)
+          || (
+            data.artist is string
+            && data.artist.size() > 0
+            && data.artist.size() <= 100
+          ))
+        && (!('position' in data)
+          || (
+            data.position is string
+            && data.position.size() > 0
+            && data.position.size() <= 40
+          ))
+        && (!('legacyId' in data)
+          || (
+            data.legacyId is string
+            && data.legacyId.matches('[a-zA-Z0-9._-]+')
+            && data.legacyId.size() <= 80
+          ))
+        && (!('width' in data)
+          || (data.width is int && data.width > 0 && data.width <= 50000))
+        && (!('height' in data)
+          || (data.height is int && data.height > 0 && data.height <= 50000))
+        && (!('originalSize' in data)
+          || (data.originalSize is int
+            && data.originalSize > 0
+            && data.originalSize <= 15 * 1024 * 1024))
+        && (!('sortOrder' in data)
+          || data.sortOrder is int
+          || data.sortOrder is float)
+        && (!('updatedBy' in data) || data.updatedBy is string)
+        && (!('updatedAt' in data) || data.updatedAt is timestamp);
     }
 
     function validPhoto() {
-      return request.resource.data.keys().hasAll([
+      let data = request.resource.data;
+      return data.keys().hasAll([
           'title',
           'alt',
           'category',
           'year',
           'featured',
           'published',
-          'url',
-          'imageUrl',
-          'storagePath',
+          'imageData',
           'fileName',
           'contentType',
           'size',
           'uploadedBy',
           'createdAt'
         ])
-        && request.resource.data.keys().hasOnly([
+        && data.keys().hasOnly([
           'title',
           'alt',
+          'artist',
           'category',
           'year',
           'featured',
           'published',
-          'url',
-          'imageUrl',
-          'storagePath',
+          'imageData',
+          'fileName',
+          'contentType',
+          'size',
+          'originalSize',
+          'width',
+          'height',
+          'position',
+          'sortOrder',
+          'legacyId',
+          'uploadedBy',
+          'updatedBy',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.title is string
+        && data.title.size() > 0
+        && data.title.size() <= 100
+        && data.alt is string
+        && data.alt.size() > 0
+        && data.alt.size() <= 180
+        && data.category is string
+        && data.category.size() > 0
+        && data.category.size() <= 50
+        && data.year is int
+        && data.year >= 1900
+        && data.year <= 2200
+        && data.featured is bool
+        && data.published is bool
+        && data.imageData is string
+        && data.imageData.size() > 100
+        && data.imageData.size() <= 900000
+        && data.imageData.matches(
+          'data:image/(jpeg|png|webp|avif);base64,.*'
+        )
+        && data.fileName is string
+        && data.fileName.size() > 0
+        && data.fileName.size() <= 180
+        && data.contentType.matches('image/(jpeg|png|webp|avif)')
+        && data.size is int
+        && data.size > 0
+        && data.size <= 700 * 1024
+        && data.uploadedBy is string
+        && data.createdAt is timestamp
+        && validOptionalPhotoFields(data);
+    }
+
+    function validSiteImage(slotId) {
+      let data = request.resource.data;
+      return slotId in [
+          'homeHero',
+          'aboutLeft',
+          'aboutPortrait',
+          'aboutRight',
+          'studioLogin'
+        ]
+        && data.keys().hasAll([
+          'slot',
+          'alt',
+          'position',
+          'imageData',
           'fileName',
           'contentType',
           'size',
           'uploadedBy',
-          'createdAt'
+          'updatedBy',
+          'createdAt',
+          'updatedAt'
         ])
-        && request.resource.data.title is string
-        && request.resource.data.title.size() > 0
-        && request.resource.data.title.size() <= 100
-        && request.resource.data.alt is string
-        && request.resource.data.alt.size() > 0
-        && request.resource.data.alt.size() <= 180
-        && request.resource.data.category is string
-        && request.resource.data.category.size() > 0
-        && request.resource.data.category.size() <= 50
-        && request.resource.data.year is int
-        && request.resource.data.year >= 1900
-        && request.resource.data.year <= 2200
-        && request.resource.data.featured is bool
-        && request.resource.data.published is bool
-        && request.resource.data.url is string
-        && request.resource.data.url.size() > 0
-        && request.resource.data.imageUrl == request.resource.data.url
-        && request.resource.data.storagePath is string
-        && request.resource.data.fileName is string
-        && request.resource.data.contentType.matches('image/(jpeg|png|webp|avif)')
-        && request.resource.data.size is int
-        && request.resource.data.size > 0
-        && request.resource.data.size <= 15 * 1024 * 1024
-        && request.resource.data.uploadedBy is string;
+        && data.keys().hasOnly([
+          'slot',
+          'alt',
+          'position',
+          'imageData',
+          'fileName',
+          'contentType',
+          'size',
+          'originalSize',
+          'width',
+          'height',
+          'uploadedBy',
+          'updatedBy',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.slot == slotId
+        && data.alt is string
+        && data.alt.size() > 0
+        && data.alt.size() <= 180
+        && data.position is string
+        && data.position.size() > 0
+        && data.position.size() <= 40
+        && data.imageData is string
+        && data.imageData.size() > 100
+        && data.imageData.size() <= 900000
+        && data.imageData.matches(
+          'data:image/(jpeg|png|webp|avif);base64,.*'
+        )
+        && data.fileName is string
+        && data.fileName.size() > 0
+        && data.fileName.size() <= 180
+        && data.contentType.matches('image/(jpeg|png|webp|avif)')
+        && data.size is int
+        && data.size > 0
+        && data.size <= 700 * 1024
+        && (!('originalSize' in data)
+          || (data.originalSize is int && data.originalSize > 0
+            && data.originalSize <= 15 * 1024 * 1024))
+        && (!('width' in data)
+          || (data.width is int && data.width > 0 && data.width <= 50000))
+        && (!('height' in data)
+          || (data.height is int && data.height > 0 && data.height <= 50000))
+        && data.uploadedBy is string
+        && data.updatedBy is string
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /studioUsers/{userId} {
+      allow get: if isSignedIn()
+        && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if validOwnerBootstrap(userId)
+        || (
+          isAdmin()
+          && request.auth.uid != userId
+          && validStudioUser(userId)
+          && request.resource.data.isOwner == false
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.updatedBy == request.auth.uid
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.updatedAt == request.time
+        );
+
+      allow update: if isAdmin()
+        && request.auth.uid != userId
+        && resource.data.isOwner == false
+        && validStudioUser(userId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'role',
+          'admin',
+          'studio',
+          'enabled',
+          'updatedAt',
+          'updatedBy'
+        ])
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.updatedAt == request.time;
+
+      allow delete: if false;
     }
 
     match /photos/{photoId} {
-      allow get: if resource.data.published == true || ownsExistingPhoto();
-      allow list: if resource.data.published == true || ownsExistingPhoto();
+      allow get: if resource.data.published == true || isStudio();
+      allow list: if resource.data.published == true || isStudio();
 
-      allow create: if signedIn()
+      allow create: if isStudio()
         && validPhoto()
         && request.resource.data.uploadedBy == request.auth.uid
-        && request.resource.data.storagePath.matches(
-          'photos/' + request.auth.uid + '/.*'
-        )
-        && request.resource.data.createdAt == request.time;
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
 
-      allow update: if ownsExistingPhoto()
+      allow update: if isStudio()
         && validPhoto()
         && request.resource.data.uploadedBy == resource.data.uploadedBy
-        && request.resource.data.storagePath == resource.data.storagePath
-        && request.resource.data.url == resource.data.url
-        && request.resource.data.createdAt == resource.data.createdAt;
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
 
-      allow delete: if ownsExistingPhoto();
+      allow delete: if isStudio();
+    }
+
+    match /siteImages/{slotId} {
+      allow read: if true;
+
+      allow create: if isStudio()
+        && validSiteImage(slotId)
+        && request.resource.data.uploadedBy == request.auth.uid
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow update: if isStudio()
+        && validSiteImage(slotId)
+        && request.resource.data.uploadedBy == resource.data.uploadedBy
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+
+      allow delete: if isStudio();
     }
 
     match /{document=**} {
@@ -96,4 +392,3 @@ service cloud.firestore {
     }
   }
 }
-

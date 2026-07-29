@@ -25,7 +25,9 @@ function createPhoto({
 
   return {
     id,
+    legacyId: id,
     title,
+    artist: title,
     source,
     url: imageUrl(source, slug),
     thumbnailUrl: thumbnailUrl(source, slug),
@@ -38,6 +40,7 @@ function createPhoto({
     alt: `${title} performing live, photographed by Julian Bjørgen.`,
     published: true,
     sortOrder: Number(id),
+    managed: false,
   };
 }
 

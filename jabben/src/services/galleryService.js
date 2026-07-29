@@ -1,18 +1,26 @@
 import {
   addDoc,
   collection,
+  deleteDoc,
+  deleteField,
+  doc,
   onSnapshot,
   query,
   serverTimestamp,
+  updateDoc,
   where,
 } from 'firebase/firestore';
+import { auth, db, firebaseConfigured } from '../lib/firebase';
 import {
-  deleteObject,
-  getDownloadURL,
-  ref,
-  uploadBytesResumable,
-} from 'firebase/storage';
-import { auth, db, firebaseConfigured, storage } from '../lib/firebase';
+  MAX_IMAGE_SIZE,
+  mediaValidationError,
+  normalizePosition,
+  requireAuthenticatedMediaServices,
+  uploadImageFile,
+  validateImageFile,
+} from './mediaServiceUtils';
+
+export { MAX_IMAGE_SIZE };
 
 export const PHOTO_CATEGORIES = [
   'Portrait',
@@ -23,29 +31,6 @@ export const PHOTO_CATEGORIES = [
   'Other',
 ];
 
-export const MAX_IMAGE_SIZE = 15 * 1024 * 1024;
-
-const ALLOWED_IMAGE_TYPES = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'image/avif',
-]);
-
-const configurationError = () => {
-  const error = new Error(
-    'Firebase is not configured. The image was not uploaded.'
-  );
-  error.code = 'firebase/not-configured';
-  return error;
-};
-
-const validationError = (message) => {
-  const error = new Error(message);
-  error.code = 'upload/invalid-input';
-  return error;
-};
-
 const timestampValue = (value) => {
   if (value && typeof value.toDate === 'function') {
     return value.toDate();
@@ -54,17 +39,58 @@ const timestampValue = (value) => {
   return value instanceof Date ? value : null;
 };
 
+const normalizedText = (value) =>
+  typeof value === 'string' ? value.trim() : '';
+
+const managementError = (code, message) => {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+};
+
+const normalizeLegacyId = (value) => {
+  if (value == null || value === '') {
+    return '';
+  }
+
+  const legacyId = String(value).trim();
+
+  if (
+    !legacyId ||
+    legacyId.length > 80 ||
+    !/^[a-zA-Z0-9._-]+$/.test(legacyId)
+  ) {
+    throw mediaValidationError('Choose a valid legacy image identifier.');
+  }
+
+  return legacyId;
+};
+
 const normalizePhoto = (snapshot) => {
   const data = snapshot.data();
+  const title = normalizedText(data.title);
+  const artist = normalizedText(data.artist) || title;
+  const url =
+    data.imageData ||
+    data.dataUrl ||
+    data.src ||
+    data.url ||
+    data.imageUrl ||
+    '';
 
   return {
     id: snapshot.id,
     ...data,
-    // Older portfolio components sometimes use imageUrl, while the canonical
-    // Firestore field is url. Keeping both here makes the subscription stable.
-    url: data.url || data.imageUrl || '',
-    imageUrl: data.imageUrl || data.url || '',
+    title,
+    artist,
+    // Keep the aliases while older components and documents use both names.
+    url,
+    imageUrl: data.imageData ? url : data.imageUrl || url,
+    thumbnailUrl: data.imageData ? url : data.thumbnailUrl || url,
+    position: data.position || '50% 50%',
     createdAt: timestampValue(data.createdAt),
+    updatedAt: timestampValue(data.updatedAt),
+    managed: true,
   };
 };
 
@@ -75,6 +101,14 @@ const sortNewestFirst = (photos) =>
     return rightTime - leftTime;
   });
 
+const noop = () => {};
+
+const reportSubscriptionError = (onError, error) => {
+  if (typeof onError === 'function') {
+    onError(error);
+  }
+};
+
 export function subscribeToPublishedPhotos(onPhotos, onError) {
   if (typeof onPhotos !== 'function') {
     throw new TypeError('onPhotos must be a function.');
@@ -82,12 +116,12 @@ export function subscribeToPublishedPhotos(onPhotos, onError) {
 
   if (!firebaseConfigured || !db) {
     onPhotos([]);
-    return () => {};
+    return noop;
   }
 
   const publishedPhotos = query(
     collection(db, 'photos'),
-    where('published', '==', true)
+    where('published', '==', true),
   );
 
   return onSnapshot(
@@ -96,59 +130,76 @@ export function subscribeToPublishedPhotos(onPhotos, onError) {
       const photos = sortNewestFirst(snapshot.docs.map(normalizePhoto));
       onPhotos(photos);
     },
-    (error) => {
-      if (typeof onError === 'function') {
-        onError(error);
-      }
-    }
+    (error) => reportSubscriptionError(onError, error),
   );
 }
 
-const safeFileName = (fileName) => {
-  const normalized = fileName
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9._-]+/g, '-')
-    .replace(/-{2,}/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .toLowerCase();
-
-  return normalized || 'image';
-};
-
-const validateUpload = ({ file, title, alt, category, year }) => {
-  if (!file || typeof file !== 'object') {
-    throw validationError('Choose an image before uploading.');
+export function subscribeToManagedPhotos(onPhotos, onError) {
+  if (typeof onPhotos !== 'function') {
+    throw new TypeError('onPhotos must be a function.');
   }
 
-  if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
-    throw validationError('Use JPG, PNG, WebP, or AVIF.');
+  if (!firebaseConfigured || !db) {
+    onPhotos([]);
+    return noop;
   }
 
-  if (!Number.isFinite(file.size) || file.size <= 0) {
-    throw validationError('The image file is empty or cannot be read.');
+  if (!auth?.currentUser) {
+    reportSubscriptionError(
+      onError,
+      managementError(
+        'auth/unauthenticated',
+        'You must be signed in to manage images.',
+      ),
+    );
+    return noop;
   }
 
-  if (file.size > MAX_IMAGE_SIZE) {
-    throw validationError('The image must be no larger than 15 MB.');
-  }
+  return onSnapshot(
+    query(collection(db, 'photos')),
+    (snapshot) => {
+      const photos = sortNewestFirst(snapshot.docs.map(normalizePhoto));
+      onPhotos(photos);
+    },
+    (error) => reportSubscriptionError(onError, error),
+  );
+}
 
-  const normalizedTitle = title?.trim();
-  const normalizedAlt = alt?.trim();
-  const normalizedCategory = category?.trim();
+const validatePhotoMetadata = ({
+  title,
+  alt,
+  artist,
+  category,
+  year,
+  position,
+}) => {
+  const normalizedTitle = normalizedText(title);
+  const normalizedAlt = normalizedText(alt);
+  const normalizedArtist = normalizedText(artist) || normalizedTitle;
+  const normalizedCategory = normalizedText(category);
   const numericYear = Number(year);
   const maxYear = new Date().getFullYear() + 1;
 
   if (!normalizedTitle || normalizedTitle.length > 100) {
-    throw validationError('The title must be between 1 and 100 characters.');
+    throw mediaValidationError(
+      'The title must be between 1 and 100 characters.',
+    );
+  }
+
+  if (!normalizedArtist || normalizedArtist.length > 100) {
+    throw mediaValidationError(
+      'The artist must be between 1 and 100 characters.',
+    );
   }
 
   if (!normalizedAlt || normalizedAlt.length > 180) {
-    throw validationError('The alt text must be between 1 and 180 characters.');
+    throw mediaValidationError(
+      'The alt text must be between 1 and 180 characters.',
+    );
   }
 
   if (!normalizedCategory || normalizedCategory.length > 50) {
-    throw validationError('Choose a valid category.');
+    throw mediaValidationError('Choose a valid category.');
   }
 
   if (
@@ -156,103 +207,290 @@ const validateUpload = ({ file, title, alt, category, year }) => {
     numericYear < 1900 ||
     numericYear > maxYear
   ) {
-    throw validationError(`The year must be between 1900 and ${maxYear}.`);
+    throw mediaValidationError(
+      `The year must be between 1900 and ${maxYear}.`,
+    );
   }
 
   return {
     title: normalizedTitle,
     alt: normalizedAlt,
+    artist: normalizedArtist,
     category: normalizedCategory,
     year: numericYear,
+    position: normalizePosition(position),
   };
 };
 
+const imageAliases = (imageData) => ({
+  url: imageData || '',
+  imageUrl: imageData || '',
+  thumbnailUrl: imageData || '',
+});
+
 export async function uploadPhoto(
-  { file, title, alt, category, year, featured = false, published = true },
-  onProgress
+  {
+    file,
+    title,
+    alt,
+    artist,
+    category,
+    year,
+    position = '50% 50%',
+    featured = false,
+    published = true,
+    legacyId,
+  },
+  onProgress,
 ) {
-  if (!firebaseConfigured || !auth || !db || !storage) {
-    throw configurationError();
-  }
+  const { user } = requireAuthenticatedMediaServices();
+  validateImageFile(file);
 
-  const user = auth.currentUser;
-
-  if (!user) {
-    const error = new Error('You must be signed in to upload images.');
-    error.code = 'auth/unauthenticated';
-    throw error;
-  }
-
-  const clean = validateUpload({ file, title, alt, category, year });
-  const uniquePart =
-    window.crypto?.randomUUID?.() ||
-    `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const storagePath = `photos/${user.uid}/${uniquePart}-${safeFileName(
-    file.name
-  )}`;
-  const storageReference = ref(storage, storagePath);
-  const uploadTask = uploadBytesResumable(storageReference, file, {
-    contentType: file.type,
-    cacheControl: 'public,max-age=31536000,immutable',
-    customMetadata: {
-      uploadedBy: user.uid,
-    },
+  const clean = validatePhotoMetadata({
+    title,
+    alt,
+    artist,
+    category,
+    year,
+    position,
+  });
+  const cleanLegacyId = normalizeLegacyId(legacyId);
+  const uploadedImage = await uploadImageFile({
+    file,
+    pathPrefix: 'photos',
+    user,
+    onProgress,
   });
 
-  await new Promise((resolve, reject) => {
-    uploadTask.on(
-      'state_changed',
-      (snapshot) => {
-        const progress =
-          snapshot.totalBytes > 0
-            ? Math.round(
-                (snapshot.bytesTransferred / snapshot.totalBytes) * 100
-              )
-            : 0;
+  const metadata = {
+    ...clean,
+    ...uploadedImage,
+    featured: Boolean(featured),
+    published: Boolean(published),
+    uploadedBy: user.uid,
+    updatedBy: user.uid,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...(cleanLegacyId ? { legacyId: cleanLegacyId } : {}),
+  };
+  const documentReference = await addDoc(collection(db, 'photos'), metadata);
 
-        if (typeof onProgress === 'function') {
-          onProgress(progress);
-        }
-      },
-      reject,
-      resolve
+  if (typeof onProgress === 'function') {
+    onProgress(100);
+  }
+
+  const now = new Date();
+  return {
+    id: documentReference.id,
+    ...metadata,
+    ...imageAliases(metadata.imageData),
+    createdAt: now,
+    updatedAt: now,
+    managed: true,
+  };
+}
+
+const mutablePhotoFields = new Set([
+  'title',
+  'alt',
+  'artist',
+  'category',
+  'year',
+  'position',
+  'featured',
+  'published',
+  'sortOrder',
+  'legacyId',
+]);
+
+const validatePartialText = (value, maximum, label) => {
+  const normalized = normalizedText(value);
+
+  if (!normalized || normalized.length > maximum) {
+    throw mediaValidationError(
+      `${label} must be between 1 and ${maximum} characters.`,
     );
+  }
+
+  return normalized;
+};
+
+const sanitizePhotoChanges = (fields) => {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    throw mediaValidationError('Choose valid photo fields to update.');
+  }
+
+  const unknownField = Object.keys(fields).find(
+    (field) => !mutablePhotoFields.has(field),
+  );
+
+  if (unknownField) {
+    throw mediaValidationError(`The photo field "${unknownField}" cannot be edited.`);
+  }
+
+  const clean = {};
+
+  if ('title' in fields) {
+    clean.title = validatePartialText(fields.title, 100, 'The title');
+  }
+
+  if ('alt' in fields) {
+    clean.alt = validatePartialText(fields.alt, 180, 'The alt text');
+  }
+
+  if ('artist' in fields) {
+    clean.artist =
+      fields.artist == null || normalizedText(fields.artist) === ''
+        ? deleteField()
+        : validatePartialText(fields.artist, 100, 'The artist');
+  }
+
+  if ('category' in fields) {
+    clean.category = validatePartialText(
+      fields.category,
+      50,
+      'The category',
+    );
+  }
+
+  if ('year' in fields) {
+    const numericYear = Number(fields.year);
+    const maxYear = new Date().getFullYear() + 1;
+
+    if (
+      !Number.isInteger(numericYear) ||
+      numericYear < 1900 ||
+      numericYear > maxYear
+    ) {
+      throw mediaValidationError(
+        `The year must be between 1900 and ${maxYear}.`,
+      );
+    }
+    clean.year = numericYear;
+  }
+
+  if ('position' in fields) {
+    clean.position = normalizePosition(fields.position);
+  }
+
+  for (const field of ['featured', 'published']) {
+    if (field in fields) {
+      if (typeof fields[field] !== 'boolean') {
+        throw mediaValidationError(`${field} must be true or false.`);
+      }
+      clean[field] = fields[field];
+    }
+  }
+
+  if ('sortOrder' in fields) {
+    const sortOrder = Number(fields.sortOrder);
+    if (!Number.isFinite(sortOrder)) {
+      throw mediaValidationError('Choose a valid photo order.');
+    }
+    clean.sortOrder = sortOrder;
+  }
+
+  if ('legacyId' in fields) {
+    const legacyId = normalizeLegacyId(fields.legacyId);
+    clean.legacyId = legacyId || deleteField();
+  }
+
+  if (Object.keys(clean).length === 0) {
+    throw mediaValidationError('Choose at least one photo field to update.');
+  }
+
+  return clean;
+};
+
+const validatePhotoId = (photoId) => {
+  if (
+    typeof photoId !== 'string' ||
+    !photoId.trim() ||
+    photoId.includes('/')
+  ) {
+    throw mediaValidationError('Choose a valid managed photo.');
+  }
+
+  return photoId.trim();
+};
+
+const validateManagedPhoto = (photo) => {
+  if (!photo || typeof photo !== 'object' || photo.managed === false) {
+    throw managementError(
+      'gallery/legacy-photo',
+      'Import this legacy image before editing or deleting it.',
+    );
+  }
+
+  return validatePhotoId(photo.id);
+};
+
+export async function updatePhoto(photoId, fields) {
+  const { user } = requireAuthenticatedMediaServices();
+  const id = validatePhotoId(photoId);
+  const changes = sanitizePhotoChanges(fields);
+
+  await updateDoc(doc(db, 'photos', id), {
+    ...changes,
+    updatedAt: serverTimestamp(),
+    updatedBy: user.uid,
   });
 
-  const url = await getDownloadURL(uploadTask.snapshot.ref);
+  return {
+    id,
+    ...changes,
+    updatedAt: new Date(),
+    updatedBy: user.uid,
+  };
+}
 
-  try {
-    const metadata = {
-      ...clean,
-      featured: Boolean(featured),
-      published: Boolean(published),
-      url,
-      imageUrl: url,
-      storagePath,
-      fileName: file.name.slice(0, 180),
-      contentType: file.type,
-      size: file.size,
-      uploadedBy: user.uid,
-      createdAt: serverTimestamp(),
-    };
-    const documentReference = await addDoc(collection(db, 'photos'), metadata);
+export async function replacePhoto(photo, file, onProgress) {
+  const { user } = requireAuthenticatedMediaServices();
+  const id = validateManagedPhoto(photo);
+  validateImageFile(file);
 
-    if (typeof onProgress === 'function') {
-      onProgress(100);
-    }
+  const uploadedImage = await uploadImageFile({
+    file,
+    pathPrefix: 'photos',
+    user,
+    onProgress,
+  });
+  const imageMetadata = uploadedImage;
 
-    return {
-      id: documentReference.id,
-      ...metadata,
-      createdAt: new Date(),
-    };
-  } catch (error) {
-    // Avoid leaving an orphaned Storage object if Firestore rejects metadata.
-    try {
-      await deleteObject(uploadTask.snapshot.ref);
-    } catch {
-      // The original Firestore error is the useful one for the caller.
-    }
-    throw error;
+  await updateDoc(doc(db, 'photos', id), {
+    ...imageMetadata,
+    // Remove aliases left by the former Storage backend. Keeping the encoded
+    // image in one field is essential to stay below Firestore's document cap.
+    url: deleteField(),
+    imageUrl: deleteField(),
+    thumbnailUrl: deleteField(),
+    storagePath: deleteField(),
+    dataUrl: deleteField(),
+    src: deleteField(),
+    updatedAt: serverTimestamp(),
+    updatedBy: user.uid,
+  });
+
+  if (typeof onProgress === 'function') {
+    onProgress(100);
   }
+
+  return {
+    ...photo,
+    ...imageMetadata,
+    ...imageAliases(imageMetadata.imageData),
+    id,
+    updatedAt: new Date(),
+    updatedBy: user.uid,
+    managed: true,
+  };
+}
+
+export async function deletePhoto(photo) {
+  requireAuthenticatedMediaServices();
+  const id = validateManagedPhoto(photo);
+
+  await deleteDoc(doc(db, 'photos', id));
+
+  return { id, deleted: true };
 }

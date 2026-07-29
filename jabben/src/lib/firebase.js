@@ -1,13 +1,11 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
-import { getStorage } from 'firebase/storage';
 
 const firebaseConfig = {
   apiKey: process.env.REACT_APP_FIREBASE_API_KEY?.trim(),
   authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN?.trim(),
   projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID?.trim(),
-  storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET?.trim(),
   messagingSenderId:
     process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID?.trim(),
   appId: process.env.REACT_APP_FIREBASE_APP_ID?.trim(),
@@ -18,7 +16,6 @@ const requiredConfig = [
   'apiKey',
   'authDomain',
   'projectId',
-  'storageBucket',
   'messagingSenderId',
   'appId',
 ];
@@ -33,7 +30,6 @@ const createFirebaseServices = () => {
       app: null,
       auth: null,
       db: null,
-      storage: null,
       configured: false,
     };
   }
@@ -45,7 +41,6 @@ const createFirebaseServices = () => {
       app,
       auth: getAuth(app),
       db: getFirestore(app),
-      storage: getStorage(app),
       configured: true,
     };
   } catch (error) {
@@ -59,7 +54,6 @@ const createFirebaseServices = () => {
       app: null,
       auth: null,
       db: null,
-      storage: null,
       configured: false,
     };
   }
@@ -71,5 +65,4 @@ export const firebaseConfigured = services.configured;
 export const firebaseApp = services.app;
 export const auth = services.auth;
 export const db = services.db;
-export const storage = services.storage;
 

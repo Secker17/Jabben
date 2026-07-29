@@ -1,17 +1,40 @@
-import { useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import styled, { keyframes } from 'styled-components';
 import { useAuth } from '../context/AuthContext';
+import { useGallery } from '../context/GalleryContext';
+import { fallbackPhotos } from '../data/portfolio';
 import {
+  deletePhoto,
   MAX_IMAGE_SIZE,
   PHOTO_CATEGORIES,
-  subscribeToPublishedPhotos,
+  replacePhoto,
+  subscribeToManagedPhotos,
+  updatePhoto,
   uploadPhoto,
 } from '../services/galleryService';
+import {
+  replaceSiteImage,
+  SITE_IMAGE_SLOTS,
+} from '../services/siteImageService';
 
 const currentYear = new Date().getFullYear();
+const imageAccept = 'image/jpeg,image/png,image/webp,image/avif';
+const studioSections = [
+  { id: 'library', label: 'Image library', number: '01' },
+  { id: 'upload', label: 'New upload', number: '02' },
+  { id: 'site-images', label: 'Site images', number: '03' },
+  { id: 'account', label: 'Account', number: '04' },
+];
 
 const initialForm = () => ({
   title: '',
+  artist: '',
   alt: '',
   category: PHOTO_CATEGORIES[0],
   year: currentYear,
@@ -19,18 +42,39 @@ const initialForm = () => ({
   published: true,
 });
 
+const photoDraft = (photo) => ({
+  title: photo.title || '',
+  artist: photo.artist || photo.title || '',
+  alt: photo.alt || '',
+  category: photo.category || PHOTO_CATEGORIES[0],
+  year: photo.year || currentYear,
+  featured: Boolean(photo.featured),
+  published: photo.published !== false,
+});
+
 const friendlyError = (error) => {
   const messages = {
+    'auth/email-already-in-use':
+      'That email already belongs to a Firebase user.',
     'auth/invalid-credential': 'Incorrect email address or password.',
+    'auth/invalid-email': 'Enter a valid email address.',
+    'auth/requires-recent-login':
+      'For security, sign out and sign in again before changing the password.',
     'auth/user-disabled': 'This account has been disabled.',
+    'auth/weak-password': 'Use a stronger password with at least 8 characters.',
+    'auth/wrong-password': 'The current password is incorrect.',
     'auth/too-many-requests':
       'Too many attempts. Please wait a moment before trying again.',
     'auth/network-request-failed':
       'Unable to connect to Firebase. Check your connection and try again.',
     'auth/missing-email': 'Enter your email address first.',
     'auth/missing-credentials': 'Enter both your email address and password.',
-    'storage/unauthorized': 'You do not have permission to upload here.',
-    'storage/quota-exceeded': 'The Firebase storage quota has been reached.',
+    'auth/not-admin': 'Only an administrator can create studio users.',
+    'permission-denied':
+      'You do not have permission to make this Firestore change.',
+    'user-admin/not-owner':
+      'This account is not the configured Studio owner.',
+    'upload/invalid-input': error?.message,
     'firebase/not-configured': 'Firebase has not been configured yet.',
   };
 
@@ -39,6 +83,103 @@ const friendlyError = (error) => {
     error?.message ||
     'Something went wrong. Please try again in a moment.'
   );
+};
+
+const validateImage = (file) => {
+  if (!file?.type || !file.type.startsWith('image/')) {
+    return 'Choose an image in JPG, PNG, WebP, or AVIF format.';
+  }
+
+  if (file.size > MAX_IMAGE_SIZE) {
+    return 'The image must be no larger than 15 MB.';
+  }
+
+  return '';
+};
+
+const getPhotoArtist = (photo) =>
+  (photo.artist || photo.title || 'Uncategorized').trim();
+
+const getAssetUrl = (asset, fallback = '') =>
+  typeof asset === 'string' ? asset : asset?.url || fallback;
+
+const getSlotId = (slot) => slot.id || slot.key || slot.slot;
+
+const getSlotFallbackUrl = (slot) =>
+  slot.fallbackUrl || slot.defaultUrl || slot.url || '';
+
+const getSlotFallbackAlt = (slot) =>
+  slot.fallbackAlt || slot.defaultAlt || slot.alt || slot.label || '';
+
+const userAccessLevels = [
+  { id: 'none', label: 'No access' },
+  { id: 'studio', label: 'Studio' },
+  { id: 'admin', label: 'Admin' },
+];
+
+const getUserAccessLevel = (accessUser) => {
+  if (accessUser?.admin) return 'admin';
+  if (accessUser?.studio) return 'studio';
+  return 'none';
+};
+
+const useObjectUrl = (file) => {
+  const [url, setUrl] = useState('');
+
+  useEffect(() => {
+    if (!file) {
+      setUrl('');
+      return undefined;
+    }
+
+    const nextUrl = URL.createObjectURL(file);
+    setUrl(nextUrl);
+
+    return () => URL.revokeObjectURL(nextUrl);
+  }, [file]);
+
+  return url;
+};
+
+const mergeManagedPhotos = (firebasePhotos) => {
+  const fallbackById = new Map(
+    fallbackPhotos.map((photo) => [String(photo.id), photo]),
+  );
+  const claimedLegacyIds = new Set();
+
+  const managedPhotos = firebasePhotos.map((photo) => {
+    const legacyId =
+      photo.legacyId === undefined || photo.legacyId === null
+        ? ''
+        : String(photo.legacyId);
+    const fallback = legacyId ? fallbackById.get(legacyId) : null;
+
+    if (legacyId) {
+      claimedLegacyIds.add(legacyId);
+    }
+
+    return {
+      ...(fallback || {}),
+      ...photo,
+      artist: photo.artist || fallback?.artist || fallback?.title || photo.title,
+      fallbackUrl: fallback?.url || '',
+      legacyId: legacyId || undefined,
+      managed: photo.managed !== false,
+    };
+  });
+
+  const originals = fallbackPhotos
+    .filter((photo) => !claimedLegacyIds.has(String(photo.id)))
+    .map((photo) => ({
+      ...photo,
+      id: `legacy:${photo.id}`,
+      legacyId: String(photo.id),
+      artist: photo.artist || photo.title,
+      fallbackUrl: photo.url,
+      managed: false,
+    }));
+
+  return [...managedPhotos, ...originals];
 };
 
 const ArrowIcon = () => (
@@ -56,6 +197,24 @@ const UploadIcon = () => (
 const CheckIcon = () => (
   <svg aria-hidden="true" viewBox="0 0 24 24">
     <path d="m5 12 4 4L19 6" />
+  </svg>
+);
+
+const EditIcon = () => (
+  <svg aria-hidden="true" viewBox="0 0 24 24">
+    <path d="m4 20 4.1-.8L19 8.3 15.7 5 4.8 15.9 4 20ZM13.8 6.9l3.3 3.3" />
+  </svg>
+);
+
+const TrashIcon = () => (
+  <svg aria-hidden="true" viewBox="0 0 24 24">
+    <path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" />
+  </svg>
+);
+
+const RestoreIcon = () => (
+  <svg aria-hidden="true" viewBox="0 0 24 24">
+    <path d="M4 8v5h5M5.5 12a7 7 0 1 0 2-5M4 8l3.5-3.5" />
   </svg>
 );
 
@@ -105,9 +264,9 @@ function SetupView() {
           Firebase needs setup.
         </SetupTitle>
         <SetupCopy>
-          The public portfolio works without configuration. To enable image
-          uploads, copy <code>.env.example</code> to <code>.env.local</code>{' '}
-          and add the values from Firebase Console.
+          The public portfolio works without configuration. To enable the
+          studio, copy <code>.env.example</code> to <code>.env.local</code> and
+          add the values from Firebase Console.
         </SetupCopy>
         <SetupSteps>
           <li>
@@ -120,7 +279,8 @@ function SetupView() {
           </li>
           <li>
             <span>03</span>
-            Create Firestore and Storage, then deploy the included rules.
+            Create Firestore and deploy the included Firestore rules. Images
+            are compressed and saved directly in Firestore.
           </li>
         </SetupSteps>
       </SetupContent>
@@ -131,11 +291,20 @@ function SetupView() {
 
 function LoginView() {
   const { login, resetPassword } = useAuth();
+  const { getSiteImage } = useGallery();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const studioLoginSlot = SITE_IMAGE_SLOTS.find(
+    (slot) => getSlotId(slot) === 'studioLogin',
+  );
+  const loginAsset = getSiteImage?.('studioLogin');
+  const loginImage = getAssetUrl(
+    loginAsset,
+    getSlotFallbackUrl(studioLoginSlot || {}),
+  );
 
   const handleLogin = async (event) => {
     event.preventDefault();
@@ -169,7 +338,7 @@ function LoginView() {
 
   return (
     <LoginShell>
-      <LoginVisual>
+      <LoginVisual $image={loginImage}>
         <LoginOverlay />
         <LoginTop>
           <Brand />
@@ -186,7 +355,7 @@ function LoginView() {
           </blockquote>
           <p>Curate, publish, and keep the portfolio alive.</p>
         </LoginQuote>
-        <FrameLabel>JULIAN BJØRGEN / ADMIN ACCESS</FrameLabel>
+        <FrameLabel>JULIAN BJØRGEN / STUDIO ACCESS</FrameLabel>
       </LoginVisual>
 
       <LoginPanel>
@@ -194,7 +363,7 @@ function LoginView() {
           <Eyebrow>Photographer access only</Eyebrow>
           <LoginTitle>Sign in to the studio</LoginTitle>
           <LoginIntro>
-            Use the email account created in Firebase Authentication.
+            Use the email account created by a studio administrator.
           </LoginIntro>
 
           <LoginForm onSubmit={handleLogin} noValidate>
@@ -230,7 +399,11 @@ function LoginView() {
               />
             </Field>
 
-            {error && <FormMessage $error role="alert">{error}</FormMessage>}
+            {error && (
+              <FormMessage $error role="alert">
+                {error}
+              </FormMessage>
+            )}
             {notice && <FormMessage role="status">{notice}</FormMessage>}
 
             <PrimaryButton type="submit" disabled={busy}>
@@ -241,7 +414,7 @@ function LoginView() {
         </LoginCard>
 
         <LoginFooter>
-          <span>Protected by Firebase Authentication</span>
+          <span>Firebase-secured studio</span>
           <span>JULIAN BJØRGEN © {currentYear}</span>
         </LoginFooter>
       </LoginPanel>
@@ -249,7 +422,117 @@ function LoginView() {
   );
 }
 
-function FileDropzone({ file, previewUrl, onFile, disabled }) {
+function AccessDeniedView() {
+  const { user, logout, refreshClaims } = useAuth();
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const handleRefresh = async () => {
+    setBusy('refresh');
+    setError('');
+    setNotice('');
+
+    try {
+      const nextClaims = await refreshClaims();
+      if (nextClaims?.studio === true || nextClaims?.admin === true) {
+        setNotice('Access confirmed. Opening the studio…');
+      } else {
+        setNotice(
+          'This account still has no active Studio access record. Ask an administrator to add it.',
+        );
+      }
+    } catch (nextError) {
+      setError(friendlyError(nextError));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const handleLogout = async () => {
+    setBusy('logout');
+    setError('');
+    setNotice('');
+
+    try {
+      await logout();
+    } catch (nextError) {
+      setError(friendlyError(nextError));
+      setBusy('');
+    }
+  };
+
+  return (
+    <DeniedShell>
+      <SetupTop>
+        <Brand dark />
+        <BackLink href="/">
+          Back to portfolio <ArrowIcon />
+        </BackLink>
+      </SetupTop>
+      <DeniedContent>
+        <Eyebrow>Studio / restricted</Eyebrow>
+        <DeniedTitle>This account does not have studio access.</DeniedTitle>
+        <SetupCopy>
+          You are signed in to Firebase, but this user does not have an active
+          Studio access record in Firestore. No portfolio or account-management
+          tools have been opened.
+        </SetupCopy>
+        <DeniedAccount>
+          <span>Signed in as</span>
+          <strong>{user?.email}</strong>
+        </DeniedAccount>
+        <DeniedGuidance>
+          <li>
+            <span>Existing user</span>
+            Ask a Studio administrator to create or approve the account, then
+            check access again.
+          </li>
+          <li>
+            <span>First owner</span>
+            Set <code>REACT_APP_STUDIO_OWNER_EMAIL</code>, deploy the Firestore
+            rules, and sign in with that exact email once. The owner access
+            record is then created automatically.
+          </li>
+        </DeniedGuidance>
+        {error && (
+          <FormMessage $error role="alert">
+            {error}
+          </FormMessage>
+        )}
+        {notice && <FormMessage role="status">{notice}</FormMessage>}
+        <DeniedActions>
+          <PrimaryButton
+            type="button"
+            onClick={handleRefresh}
+            disabled={Boolean(busy)}
+          >
+            <span>
+              {busy === 'refresh' ? 'Checking…' : 'Check access again'}
+            </span>
+            <ArrowIcon />
+          </PrimaryButton>
+          <DeniedSignOut
+            type="button"
+            onClick={handleLogout}
+            disabled={Boolean(busy)}
+          >
+            {busy === 'logout' ? 'Signing out…' : 'Sign out'}
+          </DeniedSignOut>
+        </DeniedActions>
+      </DeniedContent>
+      <SetupIndex aria-hidden="true">403</SetupIndex>
+    </DeniedShell>
+  );
+}
+
+function FileDropzone({
+  file,
+  previewUrl,
+  onFile,
+  disabled,
+  inputId = 'studio-file',
+}) {
   const inputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
 
@@ -286,9 +569,9 @@ function FileDropzone({ file, previewUrl, onFile, disabled }) {
     >
       <HiddenInput
         ref={inputRef}
-        id="studio-file"
+        id={inputId}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/avif"
+        accept={imageAccept}
         onChange={(event) => acceptFile(event.target.files?.[0])}
         disabled={disabled}
       />
@@ -328,45 +611,23 @@ function FileDropzone({ file, previewUrl, onFile, disabled }) {
           >
             Choose image
           </ChooseFile>
-          <small>JPG, PNG, WEBP, or AVIF · max 15 MB</small>
+          <small>
+            JPG, PNG, WEBP, or AVIF · max 15 MB · compressed for Firestore
+          </small>
         </EmptyDrop>
       )}
     </Dropzone>
   );
 }
 
-function StudioDashboard() {
-  const { user, logout } = useAuth();
+function UploadPanel() {
   const [form, setForm] = useState(initialForm);
   const [file, setFile] = useState(null);
-  const [previewUrl, setPreviewUrl] = useState('');
+  const previewUrl = useObjectUrl(file);
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [publishedPhotos, setPublishedPhotos] = useState([]);
-  const [galleryError, setGalleryError] = useState(false);
-
-  useEffect(
-    () =>
-      subscribeToPublishedPhotos(
-        setPublishedPhotos,
-        () => setGalleryError(true)
-      ),
-    []
-  );
-
-  useEffect(() => {
-    if (!file) {
-      setPreviewUrl('');
-      return undefined;
-    }
-
-    const nextPreviewUrl = URL.createObjectURL(file);
-    setPreviewUrl(nextPreviewUrl);
-
-    return () => URL.revokeObjectURL(nextPreviewUrl);
-  }, [file]);
 
   const updateField = (event) => {
     const { name, type, checked, value } = event.target;
@@ -379,16 +640,11 @@ function StudioDashboard() {
   const selectFile = (nextFile) => {
     setError('');
     setNotice('');
+    const validationMessage = validateImage(nextFile);
 
-    if (!nextFile.type?.startsWith('image/')) {
+    if (validationMessage) {
       setFile(null);
-      setError('Choose an image in JPG, PNG, WebP, or AVIF format.');
-      return;
-    }
-
-    if (nextFile.size > MAX_IMAGE_SIZE) {
-      setFile(null);
-      setError('The image must be no larger than 15 MB.');
+      setError(validationMessage);
       return;
     }
 
@@ -413,6 +669,11 @@ function StudioDashboard() {
       return;
     }
 
+    if (!form.artist.trim()) {
+      setError('Add an artist so the image can be grouped in the portfolio.');
+      return;
+    }
+
     setUploading(true);
     setProgress(0);
 
@@ -420,8 +681,8 @@ function StudioDashboard() {
       await uploadPhoto({ file, ...form }, setProgress);
       setNotice(
         form.published
-          ? 'The image has been uploaded and published to the portfolio.'
-          : 'The image has been saved as unpublished.'
+          ? `Uploaded and published under ${form.artist.trim()}.`
+          : `Saved under ${form.artist.trim()} as an unpublished image.`,
       );
       setFile(null);
       setForm(initialForm());
@@ -432,14 +693,1515 @@ function StudioDashboard() {
     }
   };
 
-  const handleLogout = async () => {
+  return (
+    <SectionLayout>
+      <UploadCard>
+        <CardHeader>
+          <span>New portfolio image</span>
+          <small>UPLOAD / FIREBASE</small>
+        </CardHeader>
+
+        <UploadForm onSubmit={handleUpload}>
+          <FileDropzone
+            file={file}
+            previewUrl={previewUrl}
+            onFile={selectFile}
+            disabled={uploading}
+            inputId="new-photo-file"
+          />
+
+          <FormGrid>
+            <Field>
+              <label htmlFor="photo-artist">Artist / subject</label>
+              <input
+                id="photo-artist"
+                name="artist"
+                value={form.artist}
+                onChange={updateField}
+                placeholder="For example: Ed Sheeran"
+                maxLength="100"
+                disabled={uploading}
+                required
+              />
+            </Field>
+            <Field>
+              <label htmlFor="photo-title">Image title</label>
+              <input
+                id="photo-title"
+                name="title"
+                value={form.title}
+                onChange={updateField}
+                placeholder="For example: Oslo, night one"
+                maxLength="100"
+                disabled={uploading}
+                required
+              />
+            </Field>
+            <Field $wide>
+              <label htmlFor="photo-alt">
+                Alt text <small>for accessibility</small>
+              </label>
+              <input
+                id="photo-alt"
+                name="alt"
+                value={form.alt}
+                onChange={updateField}
+                placeholder="Briefly describe what the image shows"
+                maxLength="180"
+                disabled={uploading}
+                required
+              />
+            </Field>
+            <Field>
+              <label htmlFor="photo-category">Category</label>
+              <SelectWrap>
+                <select
+                  id="photo-category"
+                  name="category"
+                  value={form.category}
+                  onChange={updateField}
+                  disabled={uploading}
+                >
+                  {PHOTO_CATEGORIES.map((category) => (
+                    <option key={category} value={category}>
+                      {category}
+                    </option>
+                  ))}
+                </select>
+                <span aria-hidden="true">⌄</span>
+              </SelectWrap>
+            </Field>
+            <Field>
+              <label htmlFor="photo-year">Year</label>
+              <input
+                id="photo-year"
+                name="year"
+                type="number"
+                min="1900"
+                max={currentYear + 1}
+                value={form.year}
+                onChange={updateField}
+                disabled={uploading}
+                required
+              />
+            </Field>
+          </FormGrid>
+
+          <ToggleGroup>
+            <ToggleLabel>
+              <input
+                type="checkbox"
+                name="published"
+                checked={form.published}
+                onChange={updateField}
+                disabled={uploading}
+              />
+              <ToggleTrack>
+                <i />
+              </ToggleTrack>
+              <span>
+                <strong>Publish now</strong>
+                Make it visible in the portfolio immediately
+              </span>
+            </ToggleLabel>
+            <ToggleLabel>
+              <input
+                type="checkbox"
+                name="featured"
+                checked={form.featured}
+                onChange={updateField}
+                disabled={uploading}
+              />
+              <ToggleTrack>
+                <i />
+              </ToggleTrack>
+              <span>
+                <strong>Featured</strong>
+                Eligible for prominent portfolio positions
+              </span>
+            </ToggleLabel>
+          </ToggleGroup>
+
+          {uploading && (
+            <ProgressWrap aria-live="polite">
+              <ProgressMeta>
+                <span>Compressing and saving to Firestore</span>
+                <strong>{progress}%</strong>
+              </ProgressMeta>
+              <ProgressTrack>
+                <i style={{ width: `${progress}%` }} />
+              </ProgressTrack>
+            </ProgressWrap>
+          )}
+
+          {error && (
+            <FormMessage $error role="alert">
+              {error}
+            </FormMessage>
+          )}
+          {notice && <FormMessage role="status">{notice}</FormMessage>}
+
+          <PublishButton type="submit" disabled={uploading}>
+            <span>{uploading ? 'Uploading…' : 'Upload image'}</span>
+            <UploadIcon />
+          </PublishButton>
+        </UploadForm>
+      </UploadCard>
+
+      <SideColumn>
+        <InfoCard $accent>
+          <CardHeader>
+            <span>How grouping works</span>
+            <small>ARTISTS</small>
+          </CardHeader>
+          <InfoBody>
+            <BigIndex>01</BigIndex>
+            <p>
+              Use the exact same artist name on every related image. Visitors
+              can then open that artist and see the complete set.
+            </p>
+          </InfoBody>
+        </InfoCard>
+        <TipCard>
+          <span>STUDIO NOTE / ACCESSIBILITY</span>
+          <p>
+            Describe the visible moment in the alt text. The artist and title
+            are already shown separately.
+          </p>
+        </TipCard>
+      </SideColumn>
+    </SectionLayout>
+  );
+}
+
+function PhotoCard({ photo }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(() => photoDraft(photo));
+  const [replacementFile, setReplacementFile] = useState(null);
+  const replacementPreview = useObjectUrl(replacementFile);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    setDraft(photoDraft(photo));
+    setReplacementFile(null);
+    setEditing(false);
+    setConfirmingDelete(false);
+  }, [photo]);
+
+  const updateField = (event) => {
+    const { name, type, checked, value } = event.target;
+    setDraft((current) => ({
+      ...current,
+      [name]: type === 'checkbox' ? checked : value,
+    }));
+  };
+
+  const chooseReplacement = (nextFile) => {
+    if (!nextFile) return;
+    const validationMessage = validateImage(nextFile);
     setError('');
+    setNotice('');
+
+    if (validationMessage) {
+      setReplacementFile(null);
+      setError(validationMessage);
+      return;
+    }
+
+    setReplacementFile(nextFile);
+    setEditing(true);
+  };
+
+  const saveChanges = async () => {
+    setError('');
+    setNotice('');
+
+    if (!draft.artist.trim()) {
+      setError('Add an artist before saving.');
+      return;
+    }
+
+    if (!draft.title.trim() || !draft.alt.trim()) {
+      setError('Add both an image title and alt text before saving.');
+      return;
+    }
+
+    if (!photo.managed && !replacementFile) {
+      setError(
+        'Choose a replacement file to create an editable Firebase version of this original.',
+      );
+      return;
+    }
+
+    setBusy(true);
+    setProgress(0);
+
+    try {
+      if (!photo.managed) {
+        await uploadPhoto(
+          {
+            file: replacementFile,
+            ...draft,
+            legacyId: photo.legacyId,
+          },
+          setProgress,
+        );
+        setNotice('The original now has an editable Firebase replacement.');
+      } else {
+        if (replacementFile) {
+          await replacePhoto(photo, replacementFile, setProgress);
+        }
+
+        await updatePhoto(photo.id, draft);
+        setNotice(
+          replacementFile
+            ? 'Image and details updated.'
+            : 'Image details updated.',
+        );
+      }
+
+      setReplacementFile(null);
+      setEditing(false);
+    } catch (nextError) {
+      setError(friendlyError(nextError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeOrRestore = async () => {
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      setNotice('');
+      return;
+    }
+
+    setBusy(true);
+    setError('');
+    setNotice('');
+
+    try {
+      await deletePhoto(photo);
+    } catch (nextError) {
+      setError(friendlyError(nextError));
+      setConfirmingDelete(false);
+      setBusy(false);
+    }
+  };
+
+  const cancelEdit = () => {
+    setDraft(photoDraft(photo));
+    setReplacementFile(null);
+    setEditing(false);
+    setError('');
+    setNotice('');
+  };
+
+  const imageUrl =
+    replacementPreview ||
+    photo.thumbnailUrl ||
+    photo.url ||
+    photo.imageUrl ||
+    photo.fallbackUrl;
+  const isOriginal = !photo.managed;
+  const restoresOriginal = Boolean(photo.managed && photo.legacyId);
+
+  return (
+    <PhotoCardShell>
+      <PhotoVisual>
+        <img
+          src={imageUrl}
+          alt={photo.alt || photo.title}
+          width="760"
+          height="570"
+          loading="lazy"
+        />
+        <PhotoBadges>
+          <PhotoBadge $warm={photo.featured}>
+            {photo.featured ? 'Featured' : photo.category}
+          </PhotoBadge>
+          <PhotoBadge>
+            {isOriginal ? 'Original' : photo.published ? 'Live' : 'Draft'}
+          </PhotoBadge>
+        </PhotoBadges>
+        {busy && (
+          <PhotoBusy aria-live="polite">
+            <span>{progress > 0 ? `${progress}%` : 'Saving…'}</span>
+          </PhotoBusy>
+        )}
+      </PhotoVisual>
+
+      <PhotoCardBody>
+        {!editing ? (
+          <>
+            <PhotoMeta>
+              <span>{getPhotoArtist(photo)}</span>
+              <h3>{photo.title}</h3>
+              <small>
+                {photo.category} / {photo.year}
+              </small>
+            </PhotoMeta>
+            <PhotoActionRow>
+              <SmallButton
+                type="button"
+                onClick={() => setEditing(true)}
+                disabled={busy}
+              >
+                <EditIcon />
+                {isOriginal ? 'Replace / edit' : 'Edit'}
+              </SmallButton>
+              {photo.managed && (
+                <DangerButton
+                  type="button"
+                  onClick={removeOrRestore}
+                  disabled={busy}
+                  $confirm={confirmingDelete}
+                >
+                  {restoresOriginal ? <RestoreIcon /> : <TrashIcon />}
+                  {confirmingDelete
+                    ? restoresOriginal
+                      ? 'Confirm restore'
+                      : 'Confirm delete'
+                    : restoresOriginal
+                      ? 'Restore original'
+                      : 'Delete'}
+                </DangerButton>
+              )}
+              {confirmingDelete && (
+                <QuietButton
+                  type="button"
+                  onClick={() => setConfirmingDelete(false)}
+                  disabled={busy}
+                >
+                  Cancel
+                </QuietButton>
+              )}
+            </PhotoActionRow>
+          </>
+        ) : (
+          <PhotoEditForm
+            onSubmit={(event) => {
+              event.preventDefault();
+              saveChanges();
+            }}
+          >
+            <CompactGrid>
+              <CompactField>
+                <label htmlFor={`artist-${photo.id}`}>Artist / subject</label>
+                <input
+                  id={`artist-${photo.id}`}
+                  name="artist"
+                  value={draft.artist}
+                  onChange={updateField}
+                  maxLength="100"
+                  disabled={busy}
+                  required
+                />
+              </CompactField>
+              <CompactField>
+                <label htmlFor={`title-${photo.id}`}>Image title</label>
+                <input
+                  id={`title-${photo.id}`}
+                  name="title"
+                  value={draft.title}
+                  onChange={updateField}
+                  maxLength="100"
+                  disabled={busy}
+                  required
+                />
+              </CompactField>
+              <CompactField $wide>
+                <label htmlFor={`alt-${photo.id}`}>Alt text</label>
+                <textarea
+                  id={`alt-${photo.id}`}
+                  name="alt"
+                  value={draft.alt}
+                  onChange={updateField}
+                  maxLength="180"
+                  rows="3"
+                  disabled={busy}
+                  required
+                />
+              </CompactField>
+              <CompactField>
+                <label htmlFor={`category-${photo.id}`}>Category</label>
+                <select
+                  id={`category-${photo.id}`}
+                  name="category"
+                  value={draft.category}
+                  onChange={updateField}
+                  disabled={busy}
+                >
+                  {PHOTO_CATEGORIES.map((category) => (
+                    <option key={category} value={category}>
+                      {category}
+                    </option>
+                  ))}
+                </select>
+              </CompactField>
+              <CompactField>
+                <label htmlFor={`year-${photo.id}`}>Year</label>
+                <input
+                  id={`year-${photo.id}`}
+                  name="year"
+                  type="number"
+                  min="1900"
+                  max={currentYear + 1}
+                  value={draft.year}
+                  onChange={updateField}
+                  disabled={busy}
+                />
+              </CompactField>
+            </CompactGrid>
+
+            <MiniToggles>
+              <ToggleLabel>
+                <input
+                  type="checkbox"
+                  name="published"
+                  checked={draft.published}
+                  onChange={updateField}
+                  disabled={busy}
+                />
+                <ToggleTrack>
+                  <i />
+                </ToggleTrack>
+                <span>
+                  <strong>Published</strong>
+                </span>
+              </ToggleLabel>
+              <ToggleLabel>
+                <input
+                  type="checkbox"
+                  name="featured"
+                  checked={draft.featured}
+                  onChange={updateField}
+                  disabled={busy}
+                />
+                <ToggleTrack>
+                  <i />
+                </ToggleTrack>
+                <span>
+                  <strong>Featured</strong>
+                </span>
+              </ToggleLabel>
+            </MiniToggles>
+
+            <ReplacementRow>
+              <HiddenInput
+                ref={fileInputRef}
+                type="file"
+                accept={imageAccept}
+                onChange={(event) =>
+                  chooseReplacement(event.target.files?.[0])
+                }
+                disabled={busy}
+              />
+              <SmallButton
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={busy}
+              >
+                <UploadIcon />
+                {replacementFile
+                  ? 'Choose another file'
+                  : isOriginal
+                    ? 'Choose replacement'
+                    : 'Replace image file'}
+              </SmallButton>
+              <span>
+                {replacementFile
+                  ? replacementFile.name
+                  : isOriginal
+                    ? 'A new file is required for original images.'
+                    : 'Keep the current file or choose a new one.'}
+              </span>
+            </ReplacementRow>
+
+            {busy && progress > 0 && (
+              <ProgressTrack aria-label={`Upload ${progress}% complete`}>
+                <i style={{ width: `${progress}%` }} />
+              </ProgressTrack>
+            )}
+            {error && (
+              <InlineMessage $error role="alert">
+                {error}
+              </InlineMessage>
+            )}
+            {notice && (
+              <InlineMessage role="status">{notice}</InlineMessage>
+            )}
+
+            <EditActions>
+              <SmallButton type="submit" $filled disabled={busy}>
+                <CheckIcon />
+                {busy
+                  ? 'Saving…'
+                  : isOriginal
+                    ? 'Create replacement'
+                    : 'Save changes'}
+              </SmallButton>
+              <QuietButton type="button" onClick={cancelEdit} disabled={busy}>
+                Cancel
+              </QuietButton>
+            </EditActions>
+          </PhotoEditForm>
+        )}
+
+        {!editing && error && (
+          <InlineMessage $error role="alert">
+            {error}
+          </InlineMessage>
+        )}
+        {!editing && notice && (
+          <InlineMessage role="status">{notice}</InlineMessage>
+        )}
+      </PhotoCardBody>
+    </PhotoCardShell>
+  );
+}
+
+function LibraryPanel({ photos, galleryError }) {
+  const [artist, setArtist] = useState('all');
+  const [category, setCategory] = useState('all');
+
+  const artists = useMemo(() => {
+    const counts = new Map();
+
+    photos.forEach((photo) => {
+      const name = getPhotoArtist(photo);
+      counts.set(name, (counts.get(name) || 0) + 1);
+    });
+
+    return [...counts.entries()].sort(([left], [right]) =>
+      left.localeCompare(right),
+    );
+  }, [photos]);
+
+  const categories = useMemo(
+    () =>
+      [...new Set(photos.map((photo) => photo.category).filter(Boolean))].sort(),
+    [photos],
+  );
+
+  const filteredPhotos = useMemo(
+    () =>
+      photos.filter((photo) => {
+        const artistMatches =
+          artist === 'all' || getPhotoArtist(photo) === artist;
+        const categoryMatches =
+          category === 'all' || photo.category === category;
+        return artistMatches && categoryMatches;
+      }),
+    [artist, category, photos],
+  );
+
+  return (
+    <LibrarySection>
+      <LibraryTop>
+        <div>
+          <Eyebrow>Portfolio manager</Eyebrow>
+          <SectionTitle>Images by artist</SectionTitle>
+          <SectionCopy>
+            Pick an artist to see the complete collection, then edit,
+            publish, feature, replace, or restore individual images.
+          </SectionCopy>
+        </div>
+        <LibraryStats>
+          <strong>{photos.length}</strong>
+          <span>images in studio</span>
+          <small>{galleryError ? 'SYNC UNAVAILABLE' : 'FIREBASE SYNCED'}</small>
+        </LibraryStats>
+      </LibraryTop>
+
+      <FilterBlock>
+        <FilterHeading>
+          <span>Artist</span>
+          <small>Click Ed Sheeran to see every Ed Sheeran image</small>
+        </FilterHeading>
+        <FilterChips role="group" aria-label="Filter images by artist">
+          <FilterChip
+            type="button"
+            $active={artist === 'all'}
+            aria-pressed={artist === 'all'}
+            onClick={() => setArtist('all')}
+          >
+            All artists <span>{photos.length}</span>
+          </FilterChip>
+          {artists.map(([name, count]) => (
+            <FilterChip
+              key={name}
+              type="button"
+              $active={artist === name}
+              aria-pressed={artist === name}
+              onClick={() => setArtist(name)}
+            >
+              {name} <span>{count}</span>
+            </FilterChip>
+          ))}
+        </FilterChips>
+      </FilterBlock>
+
+      <LibraryToolbar>
+        <p aria-live="polite">
+          Showing <strong>{filteredPhotos.length}</strong>{' '}
+          {artist === 'all' ? 'images' : `images for ${artist}`}
+        </p>
+        <label>
+          <span>Category</span>
+          <select
+            value={category}
+            onChange={(event) => setCategory(event.target.value)}
+          >
+            <option value="all">All categories</option>
+            {categories.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </LibraryToolbar>
+
+      {filteredPhotos.length > 0 ? (
+        <PhotoGrid>
+          {filteredPhotos.map((photo) => (
+            <PhotoCard
+              key={`${photo.managed ? 'managed' : 'original'}-${photo.id}`}
+              photo={photo}
+            />
+          ))}
+        </PhotoGrid>
+      ) : (
+        <EmptyLibrary>
+          <span>No images match these filters.</span>
+          <button
+            type="button"
+            onClick={() => {
+              setArtist('all');
+              setCategory('all');
+            }}
+          >
+            Clear filters
+          </button>
+        </EmptyLibrary>
+      )}
+    </LibrarySection>
+  );
+}
+
+function SiteImageCard({ slot, getSiteImage }) {
+  const slotId = getSlotId(slot);
+  const asset = getSiteImage?.(slotId);
+  const currentUrl = getAssetUrl(asset, getSlotFallbackUrl(slot));
+  const currentAlt =
+    (typeof asset === 'object' && asset?.alt) || getSlotFallbackAlt(slot);
+  const [file, setFile] = useState(null);
+  const previewUrl = useObjectUrl(file);
+  const [alt, setAlt] = useState(currentAlt);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (!file) {
+      setAlt(currentAlt);
+    }
+  }, [currentAlt, file]);
+
+  const chooseFile = (nextFile) => {
+    if (!nextFile) return;
+    const validationMessage = validateImage(nextFile);
+    setError('');
+    setNotice('');
+
+    if (validationMessage) {
+      setFile(null);
+      setError(validationMessage);
+      return;
+    }
+
+    setFile(nextFile);
+  };
+
+  const saveImage = async (event) => {
+    event.preventDefault();
+    setError('');
+    setNotice('');
+
+    if (!file) {
+      setError('Choose a replacement image first.');
+      return;
+    }
+
+    if (!alt.trim()) {
+      setError('Add alt text before saving this site image.');
+      return;
+    }
+
+    setBusy(true);
+    setProgress(0);
+
+    try {
+      await replaceSiteImage(slotId, file, { alt: alt.trim() }, setProgress);
+      setFile(null);
+      setNotice('Site image replaced. The live page will update automatically.');
+    } catch (nextError) {
+      setError(friendlyError(nextError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <SiteSlotCard>
+      <SiteSlotVisual>
+        <img
+          src={previewUrl || currentUrl}
+          alt={previewUrl ? '' : currentAlt}
+          width="900"
+          height="580"
+          loading="lazy"
+        />
+        <SiteSlotLabel>
+          <span>{slot.label || slotId}</span>
+          <small>{file ? 'NEW PREVIEW' : 'CURRENT IMAGE'}</small>
+        </SiteSlotLabel>
+      </SiteSlotVisual>
+      <SiteSlotForm onSubmit={saveImage}>
+        <p>{slot.description || 'A fixed image used on the public website.'}</p>
+        <CompactField>
+          <label htmlFor={`slot-alt-${slotId}`}>Alt text</label>
+          <textarea
+            id={`slot-alt-${slotId}`}
+            value={alt}
+            onChange={(event) => setAlt(event.target.value)}
+            rows="2"
+            maxLength="180"
+            disabled={busy}
+            required
+          />
+        </CompactField>
+        <HiddenInput
+          ref={inputRef}
+          type="file"
+          accept={imageAccept}
+          onChange={(event) => chooseFile(event.target.files?.[0])}
+          disabled={busy}
+        />
+        <SiteSlotActions>
+          <SmallButton
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            disabled={busy}
+          >
+            <UploadIcon />
+            {file ? 'Choose another' : 'Choose new image'}
+          </SmallButton>
+          <SmallButton type="submit" $filled disabled={busy || !file}>
+            <CheckIcon />
+            {busy ? 'Saving…' : 'Save replacement'}
+          </SmallButton>
+        </SiteSlotActions>
+        {file && <ChosenFile title={file.name}>{file.name}</ChosenFile>}
+        {busy && (
+          <ProgressTrack aria-label={`Upload ${progress}% complete`}>
+            <i style={{ width: `${progress}%` }} />
+          </ProgressTrack>
+        )}
+        {error && (
+          <InlineMessage $error role="alert">
+            {error}
+          </InlineMessage>
+        )}
+        {notice && <InlineMessage role="status">{notice}</InlineMessage>}
+      </SiteSlotForm>
+    </SiteSlotCard>
+  );
+}
+
+function SiteImagesPanel() {
+  const { getSiteImage } = useGallery();
+
+  return (
+    <LibrarySection>
+      <LibraryTop>
+        <div>
+          <Eyebrow>Site image manager</Eyebrow>
+          <SectionTitle>Every fixed image, in one place</SectionTitle>
+          <SectionCopy>
+            Replace hero, About, and Studio imagery without editing code. Each
+            slot shows where the image is used.
+          </SectionCopy>
+        </div>
+        <LibraryStats>
+          <strong>{SITE_IMAGE_SLOTS.length}</strong>
+          <span>editable image slots</span>
+          <small>LIVE SITE ASSETS</small>
+        </LibraryStats>
+      </LibraryTop>
+      <SiteSlotGrid>
+        {SITE_IMAGE_SLOTS.map((slot) => (
+          <SiteImageCard
+            key={getSlotId(slot)}
+            slot={slot}
+            getSiteImage={getSiteImage}
+          />
+        ))}
+      </SiteSlotGrid>
+    </LibrarySection>
+  );
+}
+
+const generateTemporaryPassword = () => {
+  const alphabet =
+    'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%';
+  const values = new Uint32Array(16);
+  window.crypto.getRandomValues(values);
+  return [...values].map((value) => alphabet[value % alphabet.length]).join('');
+};
+
+function AccessUserRow({
+  accessUser,
+  currentUserId,
+  busy,
+  onAccessChange,
+}) {
+  const currentLevel = getUserAccessLevel(accessUser);
+  const isCurrentUser = accessUser.uid === currentUserId;
+  const accessLocked = Boolean(accessUser.isOwner || isCurrentUser);
+  const displayName =
+    accessUser.displayName?.trim() ||
+    accessUser.email?.split('@')[0] ||
+    'Firebase user';
+  const initial = displayName.charAt(0).toUpperCase();
+
+  return (
+    <UserAccessRow $disabled={accessUser.disabled}>
+      <UserAvatar aria-hidden="true">{initial}</UserAvatar>
+      <UserAccessIdentity>
+        <UserNameLine>
+          <strong>{displayName}</strong>
+          {isCurrentUser && <UserTag>YOU</UserTag>}
+          {accessUser.isOwner && <UserTag $owner>OWNER</UserTag>}
+          {accessUser.disabled && <UserTag>DISABLED</UserTag>}
+        </UserNameLine>
+        <span>{accessUser.email || 'No email address'}</span>
+        <small>
+          {accessUser.lastSignInAt
+            ? `Last sign-in ${new Date(accessUser.lastSignInAt).toLocaleDateString()}`
+            : 'No recorded sign-in'}
+        </small>
+      </UserAccessIdentity>
+      <RolePicker
+        role="group"
+        aria-label={`Access level for ${accessUser.email || displayName}`}
+      >
+        {userAccessLevels.map((level) => (
+          <RoleButton
+            key={level.id}
+            type="button"
+            $active={currentLevel === level.id}
+            onClick={() => onAccessChange(accessUser, level.id)}
+            disabled={busy || accessLocked}
+            aria-pressed={currentLevel === level.id}
+          >
+            {level.label}
+          </RoleButton>
+        ))}
+      </RolePicker>
+      <AccessState $level={currentLevel}>
+        <i />
+        <span>
+          {accessLocked
+            ? accessUser.isOwner
+              ? 'Owner protected'
+              : 'Current session'
+            : busy
+              ? 'Saving…'
+              : currentLevel === 'none'
+                ? 'Cannot open Studio'
+                : currentLevel === 'admin'
+                  ? 'Full user management'
+                  : 'Can manage content'}
+        </span>
+      </AccessState>
+    </UserAccessRow>
+  );
+}
+
+function AccountPanel() {
+  const {
+    user,
+    claims,
+    isAdmin,
+    createStudioUser,
+    changePassword,
+    listStudioUsers,
+    updateStudioUserAccess,
+  } = useAuth();
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  });
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [passwordError, setPasswordError] = useState('');
+  const [passwordNotice, setPasswordNotice] = useState('');
+  const [userForm, setUserForm] = useState({
+    displayName: '',
+    email: '',
+    password: '',
+  });
+  const [showTemporaryPassword, setShowTemporaryPassword] = useState(false);
+  const [userBusy, setUserBusy] = useState(false);
+  const [userError, setUserError] = useState('');
+  const [userNotice, setUserNotice] = useState('');
+  const [accessUsers, setAccessUsers] = useState([]);
+  const [accessSearch, setAccessSearch] = useState('');
+  const [accessLoading, setAccessLoading] = useState(isAdmin);
+  const [accessBusyUid, setAccessBusyUid] = useState('');
+  const [accessError, setAccessError] = useState('');
+  const [accessNotice, setAccessNotice] = useState('');
+
+  const loadAccessUsers = useCallback(
+    async ({ silent = false } = {}) => {
+      if (!isAdmin) return;
+
+      if (typeof listStudioUsers !== 'function') {
+        setAccessLoading(false);
+        setAccessError(
+          'User management is unavailable until Firestore and its security rules are configured.',
+        );
+        return;
+      }
+
+      if (!silent) setAccessLoading(true);
+      setAccessError('');
+
+      try {
+        const result = await listStudioUsers();
+        const nextUsers = Array.isArray(result) ? result : result?.users || [];
+
+        setAccessUsers(
+          [...nextUsers].sort((left, right) => {
+            if (left.isOwner !== right.isOwner) return left.isOwner ? -1 : 1;
+            if (left.admin !== right.admin) return left.admin ? -1 : 1;
+
+            return (left.displayName || left.email || '').localeCompare(
+              right.displayName || right.email || '',
+            );
+          }),
+        );
+      } catch (nextError) {
+        setAccessError(friendlyError(nextError));
+      } finally {
+        setAccessLoading(false);
+      }
+    },
+    [isAdmin, listStudioUsers],
+  );
+
+  useEffect(() => {
+    loadAccessUsers();
+  }, [loadAccessUsers]);
+
+  const filteredAccessUsers = useMemo(() => {
+    const query = accessSearch.trim().toLowerCase();
+    if (!query) return accessUsers;
+
+    return accessUsers.filter((accessUser) =>
+      [accessUser.displayName, accessUser.email]
+        .filter(Boolean)
+        .some((value) => value.toLowerCase().includes(query)),
+    );
+  }, [accessSearch, accessUsers]);
+
+  const accessCounts = useMemo(
+    () =>
+      accessUsers.reduce(
+        (counts, accessUser) => {
+          const level = getUserAccessLevel(accessUser);
+          counts[level] += 1;
+          return counts;
+        },
+        { none: 0, studio: 0, admin: 0 },
+      ),
+    [accessUsers],
+  );
+
+  const handlePasswordChange = async (event) => {
+    event.preventDefault();
+    setPasswordError('');
+    setPasswordNotice('');
+
+    if (passwordForm.newPassword.length < 8) {
+      setPasswordError('Use a new password with at least 8 characters.');
+      return;
+    }
+
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      setPasswordError('The two new passwords do not match.');
+      return;
+    }
+
+    if (passwordForm.currentPassword === passwordForm.newPassword) {
+      setPasswordError('Choose a new password that is different from the old one.');
+      return;
+    }
+
+    setPasswordBusy(true);
+
+    try {
+      await changePassword({
+        currentPassword: passwordForm.currentPassword,
+        newPassword: passwordForm.newPassword,
+      });
+      setPasswordForm({
+        currentPassword: '',
+        newPassword: '',
+        confirmPassword: '',
+      });
+      setPasswordNotice('Your password has been changed.');
+    } catch (nextError) {
+      setPasswordError(friendlyError(nextError));
+    } finally {
+      setPasswordBusy(false);
+    }
+  };
+
+  const handleCreateUser = async (event) => {
+    event.preventDefault();
+    setUserError('');
+    setUserNotice('');
+
+    if (userForm.password.length < 8) {
+      setUserError('Use a temporary password with at least 8 characters.');
+      return;
+    }
+
+    setUserBusy(true);
+
+    try {
+      await createStudioUser({
+        displayName: userForm.displayName.trim(),
+        email: userForm.email.trim(),
+        password: userForm.password,
+      });
+      const createdEmail = userForm.email.trim();
+      setUserForm({ displayName: '', email: '', password: '' });
+      setShowTemporaryPassword(false);
+      setUserNotice(
+        `${createdEmail} can now sign in. Share the temporary password securely.`,
+      );
+      await loadAccessUsers({ silent: true });
+    } catch (nextError) {
+      setUserError(friendlyError(nextError));
+    } finally {
+      setUserBusy(false);
+    }
+  };
+
+  const makePassword = () => {
+    setUserForm((current) => ({
+      ...current,
+      password: generateTemporaryPassword(),
+    }));
+    setShowTemporaryPassword(true);
+    setUserError('');
+  };
+
+  const handleAccessChange = async (accessUser, nextLevel) => {
+    const currentLevel = getUserAccessLevel(accessUser);
+    if (
+      currentLevel === nextLevel ||
+      accessUser.isOwner ||
+      accessUser.uid === user?.uid ||
+      typeof updateStudioUserAccess !== 'function'
+    ) {
+      return;
+    }
+
+    setAccessBusyUid(accessUser.uid);
+    setAccessError('');
+    setAccessNotice('');
+
+    try {
+      const result = await updateStudioUserAccess({
+        uid: accessUser.uid,
+        studio: nextLevel !== 'none',
+        admin: nextLevel === 'admin',
+      });
+      const updatedUser = result?.user || result;
+
+      setAccessUsers((current) =>
+        current.map((candidate) =>
+          candidate.uid === accessUser.uid
+            ? { ...candidate, ...updatedUser }
+            : candidate,
+        ),
+      );
+
+      const nextLabel =
+        nextLevel === 'none'
+          ? 'no Studio access'
+          : nextLevel === 'admin'
+            ? 'administrator access'
+            : 'Studio access';
+      setAccessNotice(
+        `${accessUser.email || accessUser.displayName} now has ${nextLabel}. The change takes effect immediately.`,
+      );
+    } catch (nextError) {
+      setAccessError(friendlyError(nextError));
+    } finally {
+      setAccessBusyUid('');
+    }
+  };
+
+  return (
+    <LibrarySection>
+      <LibraryTop>
+        <div>
+          <Eyebrow>Account & access</Eyebrow>
+          <SectionTitle>Studio users</SectionTitle>
+          <SectionCopy>
+            Change your own password here. Administrators can also create
+            additional Firebase studio accounts without leaving this page.
+          </SectionCopy>
+        </div>
+        <AccountIdentity>
+          <span>{user?.displayName || 'Studio user'}</span>
+          <strong>{user?.email}</strong>
+          <small>
+            {isAdmin ? 'ADMINISTRATOR' : claims?.role?.toUpperCase() || 'STUDIO'}
+          </small>
+        </AccountIdentity>
+      </LibraryTop>
+
+      <AccountGrid>
+        <AccountCard>
+          <CardHeader>
+            <span>Change my password</span>
+            <small>EVERY USER</small>
+          </CardHeader>
+          <AccountForm onSubmit={handlePasswordChange}>
+            <Field>
+              <label htmlFor="current-password">Current password</label>
+              <input
+                id="current-password"
+                type="password"
+                autoComplete="current-password"
+                value={passwordForm.currentPassword}
+                onChange={(event) =>
+                  setPasswordForm((current) => ({
+                    ...current,
+                    currentPassword: event.target.value,
+                  }))
+                }
+                disabled={passwordBusy}
+                required
+              />
+            </Field>
+            <Field>
+              <label htmlFor="new-password">New password</label>
+              <input
+                id="new-password"
+                type="password"
+                autoComplete="new-password"
+                value={passwordForm.newPassword}
+                onChange={(event) =>
+                  setPasswordForm((current) => ({
+                    ...current,
+                    newPassword: event.target.value,
+                  }))
+                }
+                minLength="8"
+                disabled={passwordBusy}
+                required
+              />
+            </Field>
+            <Field>
+              <label htmlFor="confirm-password">Repeat new password</label>
+              <input
+                id="confirm-password"
+                type="password"
+                autoComplete="new-password"
+                value={passwordForm.confirmPassword}
+                onChange={(event) =>
+                  setPasswordForm((current) => ({
+                    ...current,
+                    confirmPassword: event.target.value,
+                  }))
+                }
+                minLength="8"
+                disabled={passwordBusy}
+                required
+              />
+            </Field>
+            {passwordError && (
+              <FormMessage $error role="alert">
+                {passwordError}
+              </FormMessage>
+            )}
+            {passwordNotice && (
+              <FormMessage role="status">{passwordNotice}</FormMessage>
+            )}
+            <PrimaryButton type="submit" disabled={passwordBusy}>
+              <span>{passwordBusy ? 'Updating…' : 'Change password'}</span>
+              <ArrowIcon />
+            </PrimaryButton>
+          </AccountForm>
+        </AccountCard>
+
+        {isAdmin ? (
+          <AccountCard>
+            <CardHeader>
+              <span>Create studio user</span>
+              <small>ADMIN ONLY</small>
+            </CardHeader>
+            <AccountForm onSubmit={handleCreateUser}>
+              <Field>
+                <label htmlFor="new-user-name">Name</label>
+                <input
+                  id="new-user-name"
+                  value={userForm.displayName}
+                  onChange={(event) =>
+                    setUserForm((current) => ({
+                      ...current,
+                      displayName: event.target.value,
+                    }))
+                  }
+                  autoComplete="off"
+                  maxLength="80"
+                  disabled={userBusy}
+                  placeholder="Photographer name"
+                  required
+                />
+              </Field>
+              <Field>
+                <label htmlFor="new-user-email">Email</label>
+                <input
+                  id="new-user-email"
+                  type="email"
+                  value={userForm.email}
+                  onChange={(event) =>
+                    setUserForm((current) => ({
+                      ...current,
+                      email: event.target.value,
+                    }))
+                  }
+                  autoComplete="off"
+                  disabled={userBusy}
+                  placeholder="name@example.com"
+                  required
+                />
+              </Field>
+              <Field>
+                <FieldHeading>
+                  <label htmlFor="new-user-password">Temporary password</label>
+                  <TextButton
+                    type="button"
+                    onClick={makePassword}
+                    disabled={userBusy}
+                  >
+                    Generate secure password
+                  </TextButton>
+                </FieldHeading>
+                <input
+                  id="new-user-password"
+                  type={showTemporaryPassword ? 'text' : 'password'}
+                  value={userForm.password}
+                  onChange={(event) =>
+                    setUserForm((current) => ({
+                      ...current,
+                      password: event.target.value,
+                    }))
+                  }
+                  autoComplete="new-password"
+                  minLength="8"
+                  disabled={userBusy}
+                  required
+                />
+                <PasswordTools>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setShowTemporaryPassword((current) => !current)
+                    }
+                    disabled={userBusy}
+                  >
+                    {showTemporaryPassword ? 'Hide password' : 'Show password'}
+                  </button>
+                  <span>The user should change it after signing in.</span>
+                </PasswordTools>
+              </Field>
+              {userError && (
+                <FormMessage $error role="alert">
+                  {userError}
+                </FormMessage>
+              )}
+              {userNotice && (
+                <FormMessage role="status">{userNotice}</FormMessage>
+              )}
+              <PublishButton type="submit" disabled={userBusy}>
+                <span>{userBusy ? 'Creating…' : 'Create Firebase user'}</span>
+                <ArrowIcon />
+              </PublishButton>
+            </AccountForm>
+          </AccountCard>
+        ) : (
+          <PermissionCard>
+            <span>ADMIN ACCESS</span>
+            <h3>User creation is hidden for this account.</h3>
+            <p>
+              Ask an administrator to create additional studio users. Your own
+              password controls remain available.
+            </p>
+          </PermissionCard>
+        )}
+      </AccountGrid>
+
+      {isAdmin && (
+        <AccessManagerCard>
+          <AccessManagerTop>
+            <div>
+              <Eyebrow>Firebase access</Eyebrow>
+              <h3>Choose who can open Studio</h3>
+              <p>
+                Every user created through Studio is stored in Firebase
+                Authentication and listed here. Grant content access, promote a
+                trusted user to administrator, or remove Studio access without
+                deleting their Firebase account.
+              </p>
+            </div>
+            <AccessCounts aria-label="Current access totals">
+              <span>
+                <strong>{accessCounts.studio}</strong>
+                Studio
+              </span>
+              <span>
+                <strong>{accessCounts.admin}</strong>
+                Admins
+              </span>
+              <span>
+                <strong>{accessCounts.none}</strong>
+                No access
+              </span>
+            </AccessCounts>
+          </AccessManagerTop>
+
+          <AccessToolbar>
+            <AccessSearch>
+              <label htmlFor="access-search">Find Firebase user</label>
+              <input
+                id="access-search"
+                type="search"
+                value={accessSearch}
+                onChange={(event) => setAccessSearch(event.target.value)}
+                placeholder="Search by name or email"
+                autoComplete="off"
+              />
+            </AccessSearch>
+            <AccessRefreshButton
+              type="button"
+              onClick={() => loadAccessUsers()}
+              disabled={accessLoading || Boolean(accessBusyUid)}
+            >
+              {accessLoading ? 'Loading…' : 'Refresh users'}
+            </AccessRefreshButton>
+          </AccessToolbar>
+
+          {accessError && (
+            <AccessMessage $error role="alert">
+              {accessError}
+            </AccessMessage>
+          )}
+          {accessNotice && (
+            <AccessMessage role="status">{accessNotice}</AccessMessage>
+          )}
+
+          {accessLoading ? (
+            <AccessLoading role="status">
+              <i />
+              Loading Firebase users…
+            </AccessLoading>
+          ) : filteredAccessUsers.length > 0 ? (
+            <UserAccessList>
+              {filteredAccessUsers.map((accessUser) => (
+                <AccessUserRow
+                  key={accessUser.uid}
+                  accessUser={accessUser}
+                  currentUserId={user?.uid}
+                  busy={accessBusyUid === accessUser.uid}
+                  onAccessChange={handleAccessChange}
+                />
+              ))}
+            </UserAccessList>
+          ) : (
+            <AccessEmpty>
+              {accessSearch
+                ? 'No Firebase users match that search.'
+                : 'No Firebase users were returned.'}
+            </AccessEmpty>
+          )}
+
+          <AccessFootnote>
+            <strong>How access works</strong>
+            “No access” keeps the Authentication account but blocks Studio.
+            Firestore applies role changes immediately. The configured owner
+            and your current session are protected here.
+          </AccessFootnote>
+        </AccessManagerCard>
+      )}
+    </LibrarySection>
+  );
+}
+
+function StudioDashboard() {
+  const { user, claims, isAdmin, logout } = useAuth();
+  const [activeSection, setActiveSection] = useState('library');
+  const [firebasePhotos, setFirebasePhotos] = useState([]);
+  const [galleryError, setGalleryError] = useState(false);
+  const [logoutError, setLogoutError] = useState('');
+
+  useEffect(
+    () =>
+      subscribeToManagedPhotos(
+        (photos) => {
+          setFirebasePhotos(photos);
+          setGalleryError(false);
+        },
+        () => setGalleryError(true),
+      ),
+    [],
+  );
+
+  const photos = useMemo(
+    () => mergeManagedPhotos(firebasePhotos),
+    [firebasePhotos],
+  );
+
+  const handleLogout = async () => {
+    setLogoutError('');
     try {
       await logout();
     } catch (nextError) {
-      setError(friendlyError(nextError));
+      setLogoutError(friendlyError(nextError));
     }
   };
+
+  const displayName =
+    user?.displayName ||
+    claims?.displayName ||
+    user?.email?.split('@')[0] ||
+    'photographer';
 
   return (
     <DashboardShell>
@@ -450,6 +2212,7 @@ function StudioDashboard() {
             <i />
             Connected
           </OnlineStatus>
+          <RoleBadge>{isAdmin ? 'Admin' : 'Studio'}</RoleBadge>
           <UserEmail>{user?.email}</UserEmail>
           <LogoutButton type="button" onClick={handleLogout}>
             Sign out
@@ -457,212 +2220,53 @@ function StudioDashboard() {
         </DashboardNavRight>
       </DashboardNav>
 
+      {logoutError && (
+        <GlobalNotice $error role="alert">
+          {logoutError}
+        </GlobalNotice>
+      )}
+
       <DashboardHeading>
         <div>
           <Eyebrow>Private workspace</Eyebrow>
           <h1>
-            Good evening, <em>Julian Bjørgen.</em>
+            Welcome back, <em>{displayName}.</em>
           </h1>
-          <p>Upload new work and publish it to the portfolio.</p>
+          <p>Curate every image and manage who can access the studio.</p>
         </div>
-        <DashboardNumber aria-hidden="true">01</DashboardNumber>
+        <DashboardNumber aria-hidden="true">S</DashboardNumber>
       </DashboardHeading>
 
-      <DashboardGrid>
-        <UploadCard>
-          <CardHeader>
-            <span>New upload</span>
-            <small>01 / IMAGE</small>
-          </CardHeader>
+      <SectionTabs role="tablist" aria-label="Studio sections">
+        {studioSections.map((section) => (
+          <SectionTab
+            key={section.id}
+            type="button"
+            role="tab"
+            aria-selected={activeSection === section.id}
+            $active={activeSection === section.id}
+            onClick={() => setActiveSection(section.id)}
+          >
+            <small>{section.number}</small>
+            <span>{section.label}</span>
+          </SectionTab>
+        ))}
+      </SectionTabs>
 
-          <UploadForm onSubmit={handleUpload}>
-            <FileDropzone
-              file={file}
-              previewUrl={previewUrl}
-              onFile={selectFile}
-              disabled={uploading}
-            />
-
-            <FormGrid>
-              <Field $wide>
-                <label htmlFor="photo-title">Title</label>
-                <input
-                  id="photo-title"
-                  name="title"
-                  value={form.title}
-                  onChange={updateField}
-                  placeholder="For example: Between the Mountains"
-                  maxLength="100"
-                  disabled={uploading}
-                  required
-                />
-              </Field>
-              <Field $wide>
-                <label htmlFor="photo-alt">
-                  Alt text <small>for accessibility</small>
-                </label>
-                <input
-                  id="photo-alt"
-                  name="alt"
-                  value={form.alt}
-                  onChange={updateField}
-                  placeholder="Briefly describe what the image shows"
-                  maxLength="180"
-                  disabled={uploading}
-                  required
-                />
-              </Field>
-              <Field>
-                <label htmlFor="photo-category">Category</label>
-                <SelectWrap>
-                  <select
-                    id="photo-category"
-                    name="category"
-                    value={form.category}
-                    onChange={updateField}
-                    disabled={uploading}
-                  >
-                    {PHOTO_CATEGORIES.map((category) => (
-                      <option key={category} value={category}>
-                        {category}
-                      </option>
-                    ))}
-                  </select>
-                  <span>⌄</span>
-                </SelectWrap>
-              </Field>
-              <Field>
-                <label htmlFor="photo-year">Year</label>
-                <input
-                  id="photo-year"
-                  name="year"
-                  type="number"
-                  min="1900"
-                  max={currentYear + 1}
-                  value={form.year}
-                  onChange={updateField}
-                  disabled={uploading}
-                  required
-                />
-              </Field>
-            </FormGrid>
-
-            <ToggleGroup>
-              <ToggleLabel>
-                <input
-                  type="checkbox"
-                  name="published"
-                  checked={form.published}
-                  onChange={updateField}
-                  disabled={uploading}
-                />
-                <ToggleTrack>
-                  <i />
-                </ToggleTrack>
-                <span>
-                  <strong>Publish now</strong>
-                  Make it visible in the portfolio immediately
-                </span>
-              </ToggleLabel>
-              <ToggleLabel>
-                <input
-                  type="checkbox"
-                  name="featured"
-                  checked={form.featured}
-                  onChange={updateField}
-                  disabled={uploading}
-                />
-                <ToggleTrack>
-                  <i />
-                </ToggleTrack>
-                <span>
-                  <strong>Featured</strong>
-                  Eligible for the home page
-                </span>
-              </ToggleLabel>
-            </ToggleGroup>
-
-            {uploading && (
-              <ProgressWrap aria-live="polite">
-                <ProgressMeta>
-                  <span>Uploading to Firebase</span>
-                  <strong>{progress}%</strong>
-                </ProgressMeta>
-                <ProgressTrack>
-                  <i style={{ width: `${progress}%` }} />
-                </ProgressTrack>
-              </ProgressWrap>
-            )}
-
-            {error && <FormMessage $error role="alert">{error}</FormMessage>}
-            {notice && <FormMessage role="status">{notice}</FormMessage>}
-
-            <PublishButton type="submit" disabled={uploading}>
-              <span>{uploading ? 'Uploading…' : 'Upload image'}</span>
-              <UploadIcon />
-            </PublishButton>
-          </UploadForm>
-        </UploadCard>
-
-        <SideColumn>
-          <StatsCard>
-            <CardHeader>
-              <span>Portfolio</span>
-              <small>LIVE</small>
-            </CardHeader>
-            <StatsBody>
-              <StatNumber>{publishedPhotos.length}</StatNumber>
-              <p>published images</p>
-              <LiveLine>
-                <i />
-                Synced live from Firestore
-              </LiveLine>
-            </StatsBody>
-          </StatsCard>
-
-          <RecentCard>
-            <CardHeader>
-              <span>Recently published</span>
-              <small>{galleryError ? 'UNAVAILABLE' : 'LIVE'}</small>
-            </CardHeader>
-            {publishedPhotos.length > 0 ? (
-              <RecentGrid>
-                {publishedPhotos.slice(0, 4).map((photo) => (
-                  <RecentPhoto key={photo.id}>
-                    <img
-                      src={photo.url}
-                      alt={photo.alt || photo.title}
-                      width="400"
-                      height="300"
-                      loading="lazy"
-                    />
-                    <span>{photo.title}</span>
-                  </RecentPhoto>
-                ))}
-              </RecentGrid>
-            ) : (
-              <EmptyRecent>
-                <span>No published images yet.</span>
-                <small>Your first upload will appear here.</small>
-              </EmptyRecent>
-            )}
-          </RecentCard>
-
-          <TipCard>
-            <span>JULIAN BJØRGEN NOTE / 01</span>
-            <p>
-              Precise alt text makes the portfolio easier to discover and more
-              useful to visitors who rely on screen readers.
-            </p>
-          </TipCard>
-        </SideColumn>
-      </DashboardGrid>
+      <DashboardContent role="tabpanel">
+        {activeSection === 'library' && (
+          <LibraryPanel photos={photos} galleryError={galleryError} />
+        )}
+        {activeSection === 'upload' && <UploadPanel />}
+        {activeSection === 'site-images' && <SiteImagesPanel />}
+        {activeSection === 'account' && <AccountPanel />}
+      </DashboardContent>
     </DashboardShell>
   );
 }
 
 export function StudioPage() {
-  const { user, loading, configured } = useAuth();
+  const { user, loading, configured, isStudio } = useAuth();
 
   if (loading) {
     return <LoadingView />;
@@ -672,7 +2276,11 @@ export function StudioPage() {
     return <SetupView />;
   }
 
-  return user ? <StudioDashboard /> : <LoginView />;
+  if (!user) {
+    return <LoginView />;
+  }
+
+  return isStudio ? <StudioDashboard /> : <AccessDeniedView />;
 }
 
 export default StudioPage;
@@ -694,21 +2302,26 @@ const BrandLink = styled.a`
   align-items: center;
   gap: 12px;
   color: ${({ $dark }) => ($dark ? '#11110f' : '#f5f1e8')};
-  text-decoration: none;
-  font-family: Arial, Helvetica, sans-serif;
-  font-weight: 800;
-  font-size: 14px;
-  line-height: 1;
+  font: 800 14px/1 Arial, Helvetica, sans-serif;
   letter-spacing: 0.16em;
+  text-decoration: none;
 
   small {
     display: block;
     margin-top: 5px;
     color: ${({ $dark }) =>
-      $dark ? 'rgba(17, 17, 15, .52)' : 'rgba(245, 241, 232, .55)'};
+      $dark ? 'rgba(17,17,15,.52)' : 'rgba(245,241,232,.55)'};
     font-size: 7px;
     font-weight: 500;
     letter-spacing: 0.21em;
+  }
+
+  @media (max-width: 480px) {
+    font-size: 11px;
+
+    small {
+      font-size: 6px;
+    }
   }
 `;
 
@@ -716,16 +2329,13 @@ const BrandMark = styled.b`
   display: grid;
   width: 38px;
   height: 38px;
-  place-items: center;
   border: 1px solid
     ${({ $dark }) =>
-      $dark ? 'rgba(17, 17, 15, .25)' : 'rgba(245, 241, 232, .35)'};
+      $dark ? 'rgba(17,17,15,.25)' : 'rgba(245,241,232,.35)'};
   border-radius: 50%;
-  font-family: Georgia, 'Times New Roman', serif;
-  font-size: 20px;
-  font-style: italic;
-  font-weight: 400;
+  font: italic 400 20px/1 Georgia, 'Times New Roman', serif;
   letter-spacing: 0;
+  place-items: center;
 `;
 
 const LoadingShell = styled.main`
@@ -769,6 +2379,129 @@ const SetupShell = styled.main`
   background: #ebe8df;
   color: #11110f;
   font-family: Arial, Helvetica, sans-serif;
+`;
+
+const DeniedShell = styled(SetupShell)`
+  background: #e9e6dc;
+`;
+
+const DeniedContent = styled.section`
+  position: relative;
+  z-index: 1;
+  width: min(100%, 820px);
+  margin-top: clamp(80px, 13vh, 150px);
+  animation: ${pageFade} 0.65s ease both;
+`;
+
+const DeniedTitle = styled.h1`
+  max-width: 800px;
+  margin: 23px 0 25px;
+  font: 400 clamp(48px, 7vw, 92px) / 0.91 Georgia, 'Times New Roman', serif;
+  letter-spacing: -0.055em;
+`;
+
+const DeniedAccount = styled.div`
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 34px;
+  padding: 17px 18px;
+  border: 1px solid rgba(17, 17, 15, 0.15);
+  background: rgba(255, 255, 255, 0.25);
+
+  span {
+    color: rgba(17, 17, 15, 0.45);
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+
+  strong {
+    overflow: hidden;
+    font-size: 12px;
+    text-overflow: ellipsis;
+  }
+
+  @media (max-width: 520px) {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
+  }
+`;
+
+const DeniedGuidance = styled.ul`
+  display: grid;
+  margin: 18px 0 24px;
+  padding: 0;
+  border-top: 1px solid rgba(17, 17, 15, 0.14);
+  list-style: none;
+
+  li {
+    display: grid;
+    padding: 15px 0;
+    border-bottom: 1px solid rgba(17, 17, 15, 0.14);
+    color: rgba(17, 17, 15, 0.62);
+    font-size: 12px;
+    line-height: 1.6;
+    grid-template-columns: 120px minmax(0, 1fr);
+    gap: 18px;
+  }
+
+  span {
+    color: #c54a2c;
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  code {
+    color: #11110f;
+    font-size: 0.9em;
+  }
+
+  @media (max-width: 520px) {
+    li {
+      grid-template-columns: 1fr;
+      gap: 5px;
+    }
+  }
+`;
+
+const DeniedActions = styled.div`
+  display: grid;
+  margin-top: 18px;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 10px;
+
+  @media (max-width: 480px) {
+    grid-template-columns: 1fr;
+  }
+`;
+
+const DeniedSignOut = styled.button`
+  min-height: 58px;
+  padding: 0 18px;
+  border: 1px solid rgba(17, 17, 15, 0.25);
+  background: transparent;
+  color: #11110f;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+
+  &:hover:not(:disabled) {
+    border-color: #c54a2c;
+    color: #c54a2c;
+  }
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.55;
+  }
 `;
 
 const SetupTop = styled.div`
@@ -884,6 +2617,14 @@ const BackLink = styled.a`
   &:hover svg {
     transform: translateX(3px);
   }
+
+  @media (max-width: 520px) {
+    font-size: 0;
+
+    svg {
+      width: 22px;
+    }
+  }
 `;
 
 const LoginShell = styled.main`
@@ -906,8 +2647,7 @@ const LoginVisual = styled.section`
   padding: 28px clamp(24px, 5vw, 72px) 42px;
   background:
     linear-gradient(180deg, rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.35)),
-    url('https://static.wixstatic.com/media/29cc10_0ee30b9811de42f3bd6fee755601be0e~mv2.jpg/v1/fill/w_1600,h_1800,al_c,q_90/billie-eilish.jpg')
-      center/cover;
+    ${({ $image }) => ($image ? `url("${$image}") center/cover` : '#24251f')};
   color: #f5f1e8;
 
   @media (max-width: 820px) {
@@ -966,10 +2706,10 @@ const FrameLabel = styled.span`
   z-index: 2;
   right: 24px;
   bottom: 42px;
-  writing-mode: vertical-rl;
   font-size: 8px;
   font-weight: 700;
   letter-spacing: 0.22em;
+  writing-mode: vertical-rl;
 `;
 
 const LoginPanel = styled.section`
@@ -978,6 +2718,10 @@ const LoginPanel = styled.section`
   flex-direction: column;
   justify-content: center;
   padding: clamp(52px, 9vw, 120px) clamp(28px, 7vw, 112px) 28px;
+
+  @media (max-width: 820px) {
+    min-height: auto;
+  }
 `;
 
 const LoginCard = styled.div`
@@ -1061,6 +2805,7 @@ const FieldHeading = styled.div`
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  gap: 15px;
 
   label {
     margin-bottom: 10px;
@@ -1073,7 +2818,8 @@ const TextButton = styled.button`
   background: transparent;
   color: rgba(17, 17, 15, 0.5);
   cursor: pointer;
-  font: 600 9px/1 Arial, Helvetica, sans-serif;
+  font: 600 9px/1.2 Arial, Helvetica, sans-serif;
+  text-align: right;
   text-decoration: underline;
   text-underline-offset: 3px;
 
@@ -1115,6 +2861,8 @@ const PrimaryButton = styled.button`
     width: 19px;
     fill: none;
     stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
     stroke-width: 1.5;
   }
 
@@ -1132,7 +2880,9 @@ const PrimaryButton = styled.button`
 const LoginFooter = styled.footer`
   display: flex;
   justify-content: space-between;
-  padding-top: 35px;
+  gap: 20px;
+  margin-top: 55px;
+  padding-top: 22px;
   border-top: 1px solid rgba(17, 17, 15, 0.12);
   color: rgba(17, 17, 15, 0.35);
   font-size: 8px;
@@ -1154,17 +2904,17 @@ const DashboardNav = styled.nav`
   min-height: 88px;
   align-items: center;
   justify-content: space-between;
-  padding: 0 clamp(22px, 4.5vw, 70px);
+  padding: 0 clamp(18px, 4.5vw, 70px);
   border-bottom: 1px solid rgba(238, 236, 228, 0.12);
 `;
 
 const DashboardNavRight = styled.div`
   display: flex;
   align-items: center;
-  gap: 22px;
+  gap: 16px;
 
   @media (max-width: 650px) {
-    gap: 10px;
+    gap: 8px;
   }
 `;
 
@@ -1186,16 +2936,26 @@ const OnlineStatus = styled.span`
     box-shadow: 0 0 0 4px rgba(131, 163, 107, 0.1);
   }
 
-  @media (max-width: 650px) {
+  @media (max-width: 720px) {
     display: none;
   }
+`;
+
+const RoleBadge = styled.span`
+  padding: 6px 8px;
+  border: 1px solid rgba(207, 86, 53, 0.48);
+  color: #e87554;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
 `;
 
 const UserEmail = styled.span`
   color: rgba(238, 236, 228, 0.38);
   font-size: 9px;
 
-  @media (max-width: 760px) {
+  @media (max-width: 820px) {
     display: none;
   }
 `;
@@ -1217,6 +2977,16 @@ const LogoutButton = styled.button`
   }
 `;
 
+const GlobalNotice = styled.p`
+  width: min(calc(100% - 44px), 1400px);
+  margin: 20px auto 0;
+  padding: 12px 15px;
+  border-left: 2px solid #b93927;
+  background: rgba(185, 57, 39, 0.14);
+  color: #f1b3a8;
+  font-size: 12px;
+`;
+
 const DashboardHeading = styled.header`
   position: relative;
   display: flex;
@@ -1224,16 +2994,17 @@ const DashboardHeading = styled.header`
   align-items: flex-end;
   justify-content: space-between;
   margin: 0 auto;
-  padding: clamp(70px, 10vw, 145px) clamp(22px, 4.5vw, 70px)
-    clamp(45px, 6vw, 80px);
+  padding: clamp(62px, 9vw, 128px) clamp(22px, 4.5vw, 70px)
+    clamp(42px, 6vw, 72px);
   overflow: hidden;
   animation: ${pageFade} 0.6s ease both;
 
   h1 {
     position: relative;
     z-index: 1;
+    max-width: 1050px;
     margin: 23px 0 15px;
-    font: 400 clamp(48px, 6.5vw, 94px) / 0.9 Georgia, 'Times New Roman',
+    font: 400 clamp(45px, 6.5vw, 94px) / 0.9 Georgia, 'Times New Roman',
       serif;
     letter-spacing: -0.06em;
   }
@@ -1252,22 +3023,547 @@ const DashboardHeading = styled.header`
 
 const DashboardNumber = styled.span`
   position: absolute;
-  right: 3%;
-  bottom: -0.1em;
+  right: 4%;
+  bottom: -0.2em;
   color: rgba(238, 236, 228, 0.025);
-  font: 400 clamp(180px, 30vw, 430px) / 0.75 Georgia, serif;
+  font: 400 clamp(230px, 32vw, 460px) / 0.75 Georgia, serif;
   letter-spacing: -0.08em;
 `;
 
-const DashboardGrid = styled.div`
+const SectionTabs = styled.div`
   display: grid;
   width: min(calc(100% - 44px), 1300px);
   margin: 0 auto;
-  grid-template-columns: minmax(0, 1.55fr) minmax(290px, 0.75fr);
-  gap: 20px;
-  animation: ${pageFade} 0.6s 0.12s ease both;
+  border: 1px solid rgba(238, 236, 228, 0.14);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  animation: ${pageFade} 0.6s 0.08s ease both;
 
-  @media (max-width: 960px) {
+  @media (max-width: 720px) {
+    overflow-x: auto;
+    grid-template-columns: repeat(4, minmax(150px, 1fr));
+  }
+`;
+
+const SectionTab = styled.button`
+  display: flex;
+  min-height: 68px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 18px;
+  border: 0;
+  border-right: 1px solid rgba(238, 236, 228, 0.14);
+  background: ${({ $active }) => ($active ? '#cf5635' : 'transparent')};
+  color: ${({ $active }) => ($active ? '#11110f' : '#eeece4')};
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
+
+  &:last-child {
+    border-right: 0;
+  }
+
+  small {
+    color: ${({ $active }) =>
+      $active ? 'rgba(17,17,15,.5)' : 'rgba(238,236,228,.35)'};
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+  }
+
+  span {
+    font: 400 18px/1 Georgia, 'Times New Roman', serif;
+  }
+
+  &:hover:not([aria-selected='true']) {
+    background: rgba(238, 236, 228, 0.06);
+  }
+`;
+
+const DashboardContent = styled.div`
+  width: min(calc(100% - 44px), 1300px);
+  margin: 20px auto 0;
+  animation: ${pageFade} 0.45s ease both;
+`;
+
+const LibrarySection = styled.section`
+  padding: clamp(24px, 4vw, 48px);
+  background: #e9e6dc;
+  color: #11110f;
+`;
+
+const LibraryTop = styled.header`
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 40px;
+  padding-bottom: 38px;
+  border-bottom: 1px solid rgba(17, 17, 15, 0.14);
+
+  @media (max-width: 720px) {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 24px;
+  }
+`;
+
+const SectionTitle = styled.h2`
+  margin: 18px 0 12px;
+  font: 400 clamp(38px, 5vw, 68px) / 0.94 Georgia, 'Times New Roman', serif;
+  letter-spacing: -0.05em;
+`;
+
+const SectionCopy = styled.p`
+  max-width: 650px;
+  margin: 0;
+  color: rgba(17, 17, 15, 0.58);
+  font-size: 13px;
+  line-height: 1.65;
+`;
+
+const LibraryStats = styled.div`
+  min-width: 150px;
+  text-align: right;
+
+  strong,
+  span,
+  small {
+    display: block;
+  }
+
+  strong {
+    font: 400 70px/0.8 Georgia, 'Times New Roman', serif;
+    letter-spacing: -0.07em;
+  }
+
+  span {
+    margin-top: 12px;
+    color: rgba(17, 17, 15, 0.58);
+    font: italic 400 16px/1 Georgia, 'Times New Roman', serif;
+  }
+
+  small {
+    margin-top: 12px;
+    color: #48724f;
+    font-size: 7px;
+    font-weight: 800;
+    letter-spacing: 0.15em;
+  }
+
+  @media (max-width: 720px) {
+    text-align: left;
+  }
+`;
+
+const FilterBlock = styled.div`
+  padding: 30px 0 25px;
+`;
+
+const FilterHeading = styled.div`
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 14px;
+
+  > span {
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  small {
+    color: rgba(17, 17, 15, 0.4);
+    font-size: 9px;
+  }
+
+  @media (max-width: 600px) {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+`;
+
+const FilterChips = styled.div`
+  display: flex;
+  overflow-x: auto;
+  padding-bottom: 5px;
+  gap: 7px;
+  scrollbar-width: thin;
+`;
+
+const FilterChip = styled.button`
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 0 13px;
+  border: 1px solid
+    ${({ $active }) => ($active ? '#11110f' : 'rgba(17,17,15,.2)')};
+  border-radius: 30px;
+  background: ${({ $active }) => ($active ? '#11110f' : 'transparent')};
+  color: ${({ $active }) => ($active ? '#f5f1e8' : '#11110f')};
+  cursor: pointer;
+  font-size: 10px;
+  white-space: nowrap;
+
+  span {
+    display: grid;
+    min-width: 19px;
+    height: 19px;
+    padding: 0 4px;
+    border-radius: 20px;
+    background: ${({ $active }) =>
+      $active ? 'rgba(255,255,255,.13)' : 'rgba(17,17,15,.08)'};
+    font-size: 8px;
+    place-items: center;
+  }
+`;
+
+const LibraryToolbar = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 18px;
+  padding: 16px 0;
+  border-top: 1px solid rgba(17, 17, 15, 0.14);
+  border-bottom: 1px solid rgba(17, 17, 15, 0.14);
+
+  p {
+    margin: 0;
+    color: rgba(17, 17, 15, 0.55);
+    font-size: 11px;
+  }
+
+  strong {
+    color: #11110f;
+  }
+
+  label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    span {
+      color: rgba(17, 17, 15, 0.45);
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+  }
+
+  select {
+    height: 36px;
+    padding: 0 34px 0 11px;
+    border: 1px solid rgba(17, 17, 15, 0.2);
+    border-radius: 0;
+    background: rgba(255, 255, 255, 0.3);
+    color: #11110f;
+    font-size: 10px;
+  }
+
+  @media (max-width: 560px) {
+    align-items: stretch;
+    flex-direction: column;
+
+    label {
+      justify-content: space-between;
+    }
+  }
+`;
+
+const PhotoGrid = styled.div`
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+
+  @media (max-width: 1060px) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (max-width: 640px) {
+    grid-template-columns: 1fr;
+  }
+`;
+
+const PhotoCardShell = styled.article`
+  min-width: 0;
+  border: 1px solid rgba(17, 17, 15, 0.14);
+  background: rgba(255, 255, 255, 0.25);
+  content-visibility: auto;
+  contain-intrinsic-size: 520px;
+`;
+
+const PhotoVisual = styled.div`
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 4 / 3;
+  background: #c9c6bc;
+
+  > img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+`;
+
+const PhotoBadges = styled.div`
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  left: 12px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+`;
+
+const PhotoBadge = styled.span`
+  padding: 6px 8px;
+  background: ${({ $warm }) =>
+    $warm ? '#cf5635' : 'rgba(17,17,15,.78)'};
+  color: ${({ $warm }) => ($warm ? '#11110f' : '#f5f1e8')};
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+`;
+
+const PhotoBusy = styled.div`
+  position: absolute;
+  inset: 0;
+  display: grid;
+  background: rgba(17, 17, 15, 0.58);
+  color: white;
+  font: 400 24px/1 Georgia, 'Times New Roman', serif;
+  place-items: center;
+`;
+
+const PhotoCardBody = styled.div`
+  padding: 18px;
+`;
+
+const PhotoMeta = styled.div`
+  min-height: 91px;
+
+  > span {
+    color: #c54a2c;
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+
+  h3 {
+    margin: 8px 0 10px;
+    font: 400 24px/1 Georgia, 'Times New Roman', serif;
+  }
+
+  small {
+    color: rgba(17, 17, 15, 0.45);
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+`;
+
+const PhotoActionRow = styled.div`
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(17, 17, 15, 0.12);
+`;
+
+const SmallButton = styled.button`
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 11px;
+  border: 1px solid
+    ${({ $filled }) => ($filled ? '#11110f' : 'rgba(17,17,15,.22)')};
+  background: ${({ $filled }) => ($filled ? '#11110f' : 'transparent')};
+  color: ${({ $filled }) => ($filled ? '#f5f1e8' : '#11110f')};
+  cursor: pointer;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+
+  svg {
+    width: 14px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.5;
+  }
+
+  &:hover:not(:disabled) {
+    border-color: #c54a2c;
+    background: #c54a2c;
+    color: #11110f;
+  }
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.5;
+  }
+`;
+
+const DangerButton = styled(SmallButton)`
+  margin-left: auto;
+  border-color: ${({ $confirm }) =>
+    $confirm ? '#9b3225' : 'rgba(155,50,37,.3)'};
+  background: ${({ $confirm }) => ($confirm ? '#9b3225' : 'transparent')};
+  color: ${({ $confirm }) => ($confirm ? '#fff' : '#8f2d20')};
+`;
+
+const QuietButton = styled.button`
+  min-height: 34px;
+  padding: 0 7px;
+  border: 0;
+  background: transparent;
+  color: rgba(17, 17, 15, 0.52);
+  cursor: pointer;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-transform: uppercase;
+`;
+
+const PhotoEditForm = styled.form`
+  display: grid;
+  gap: 14px;
+`;
+
+const CompactGrid = styled.div`
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 10px;
+
+  @media (max-width: 400px) {
+    grid-template-columns: 1fr;
+  }
+`;
+
+const CompactField = styled.div`
+  grid-column: ${({ $wide }) => ($wide ? '1 / -1' : 'auto')};
+
+  label {
+    display: block;
+    margin-bottom: 6px;
+    color: rgba(17, 17, 15, 0.58);
+    font-size: 7px;
+    font-weight: 800;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+  }
+
+  input,
+  select,
+  textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 40px;
+    padding: 9px 10px;
+    border: 1px solid rgba(17, 17, 15, 0.18);
+    border-radius: 0;
+    outline: none;
+    background: rgba(255, 255, 255, 0.45);
+    color: #11110f;
+    font: 400 11px/1.35 Arial, Helvetica, sans-serif;
+    resize: vertical;
+
+    &:focus {
+      border-color: #c54a2c;
+    }
+  }
+
+  @media (max-width: 400px) {
+    grid-column: auto;
+  }
+`;
+
+const MiniToggles = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 12px 0;
+  border-top: 1px solid rgba(17, 17, 15, 0.1);
+  border-bottom: 1px solid rgba(17, 17, 15, 0.1);
+`;
+
+const ReplacementRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  > span {
+    min-width: 0;
+    overflow: hidden;
+    color: rgba(17, 17, 15, 0.48);
+    font-size: 8px;
+    line-height: 1.4;
+    text-overflow: ellipsis;
+  }
+`;
+
+const InlineMessage = styled.p`
+  margin: 0;
+  padding: 9px 10px;
+  border-left: 2px solid ${({ $error }) => ($error ? '#b93927' : '#427052')};
+  background: ${({ $error }) =>
+    $error ? 'rgba(185,57,39,.07)' : 'rgba(66,112,82,.08)'};
+  color: ${({ $error }) => ($error ? '#8f2d20' : '#315a40')};
+  font-size: 9px;
+  line-height: 1.45;
+`;
+
+const EditActions = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 10px;
+`;
+
+const EmptyLibrary = styled.div`
+  display: grid;
+  min-height: 240px;
+  place-items: center;
+  align-content: center;
+  gap: 14px;
+  color: rgba(17, 17, 15, 0.52);
+  font: italic 400 20px/1.2 Georgia, 'Times New Roman', serif;
+
+  button {
+    border: 0;
+    background: transparent;
+    color: #c54a2c;
+    cursor: pointer;
+    font: 800 8px/1 Arial, Helvetica, sans-serif;
+    letter-spacing: 0.14em;
+    text-decoration: underline;
+    text-transform: uppercase;
+  }
+`;
+
+const SectionLayout = styled.div`
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.65fr);
+  gap: 20px;
+
+  @media (max-width: 940px) {
     grid-template-columns: 1fr;
   }
 `;
@@ -1279,9 +3575,10 @@ const UploadCard = styled.section`
 
 const CardHeader = styled.header`
   display: flex;
-  height: 58px;
+  min-height: 58px;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   padding: 0 24px;
   border-bottom: 1px solid rgba(17, 17, 15, 0.13);
 
@@ -1308,13 +3605,17 @@ const Dropzone = styled.div`
   overflow: hidden;
   border: 1px
     ${({ $hasFile }) => ($hasFile ? 'solid' : 'dashed')}
-    ${({ $dragging }) => ($dragging ? '#c54a2c' : 'rgba(17, 17, 15, .25)')};
+    ${({ $dragging }) => ($dragging ? '#c54a2c' : 'rgba(17,17,15,.25)')};
   background: ${({ $dragging }) =>
     $dragging ? 'rgba(197,74,44,.08)' : 'rgba(255,255,255,.19)'};
   place-items: center;
   transition:
     border-color 0.2s ease,
     background 0.2s ease;
+
+  @media (max-width: 580px) {
+    min-height: 270px;
+  }
 `;
 
 const HiddenInput = styled.input`
@@ -1412,6 +3713,7 @@ const FileDetails = styled.div`
 
   > span {
     display: flex;
+    min-width: 0;
     flex-direction: column;
     gap: 4px;
     font-size: 9px;
@@ -1458,6 +3760,12 @@ const ChangeFile = styled.button`
   font-weight: 800;
   letter-spacing: 0.12em;
   text-transform: uppercase;
+
+  @media (max-width: 480px) {
+    top: 16px;
+    right: 16px;
+    bottom: auto;
+  }
 `;
 
 const FormGrid = styled.div`
@@ -1479,8 +3787,8 @@ const SelectWrap = styled.div`
   position: relative;
 
   select {
-    appearance: none;
     padding-right: 42px;
+    appearance: none;
   }
 
   span {
@@ -1604,14 +3912,6 @@ const PublishButton = styled(PrimaryButton)`
   margin-top: 25px;
   background: #c54a2c;
 
-  svg {
-    width: 18px;
-    fill: none;
-    stroke: currentColor;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-
   &:hover:not(:disabled) {
     background: #11110f;
   }
@@ -1623,108 +3923,24 @@ const SideColumn = styled.aside`
   gap: 20px;
 `;
 
-const StatsCard = styled.section`
-  background: #cf5635;
+const InfoCard = styled.section`
+  background: ${({ $accent }) => ($accent ? '#cf5635' : '#e9e6dc')};
   color: #11110f;
 `;
 
-const StatsBody = styled.div`
-  padding: 29px 24px 24px;
+const InfoBody = styled.div`
+  padding: 28px 24px;
 
-  > p {
-    margin: -7px 0 28px;
-    font: italic 400 21px/1 Georgia, 'Times New Roman', serif;
+  p {
+    margin: 18px 0 0;
+    font: italic 400 18px/1.45 Georgia, 'Times New Roman', serif;
   }
 `;
 
-const StatNumber = styled.strong`
+const BigIndex = styled.strong`
   display: block;
-  font: 400 98px/0.92 Georgia, 'Times New Roman', serif;
+  font: 400 88px/0.8 Georgia, 'Times New Roman', serif;
   letter-spacing: -0.08em;
-`;
-
-const LiveLine = styled.span`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-top: 17px;
-  border-top: 1px solid rgba(17, 17, 15, 0.2);
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-
-  i {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: #11110f;
-  }
-`;
-
-const RecentCard = styled.section`
-  background: #e9e6dc;
-  color: #11110f;
-`;
-
-const RecentGrid = styled.div`
-  display: grid;
-  padding: 14px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-`;
-
-const RecentPhoto = styled.figure`
-  position: relative;
-  min-height: 128px;
-  margin: 0;
-  overflow: hidden;
-  background: #c9c6bc;
-
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    transition: transform 0.35s ease;
-  }
-
-  span {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    overflow: hidden;
-    padding: 22px 9px 8px;
-    background: linear-gradient(transparent, rgba(0, 0, 0, 0.65));
-    color: white;
-    font-size: 8px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  &:hover img {
-    transform: scale(1.035);
-  }
-`;
-
-const EmptyRecent = styled.div`
-  display: flex;
-  min-height: 175px;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  padding: 24px;
-  text-align: center;
-
-  span {
-    font: 400 20px/1.2 Georgia, 'Times New Roman', serif;
-  }
-
-  small {
-    margin-top: 8px;
-    color: rgba(17, 17, 15, 0.4);
-    font-size: 9px;
-  }
 `;
 
 const TipCard = styled.section`
@@ -1742,5 +3958,550 @@ const TipCard = styled.section`
     margin: 17px 0 0;
     color: rgba(238, 236, 228, 0.58);
     font: italic 400 18px/1.45 Georgia, 'Times New Roman', serif;
+  }
+`;
+
+const SiteSlotGrid = styled.div`
+  display: grid;
+  margin-top: 30px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+
+  @media (max-width: 760px) {
+    grid-template-columns: 1fr;
+  }
+`;
+
+const SiteSlotCard = styled.article`
+  min-width: 0;
+  border: 1px solid rgba(17, 17, 15, 0.14);
+  background: rgba(255, 255, 255, 0.27);
+`;
+
+const SiteSlotVisual = styled.div`
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  background: #c9c6bc;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+`;
+
+const SiteSlotLabel = styled.div`
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 40px 16px 14px;
+  background: linear-gradient(transparent, rgba(17, 17, 15, 0.78));
+  color: white;
+
+  span {
+    font: 400 21px/1 Georgia, 'Times New Roman', serif;
+  }
+
+  small {
+    font-size: 7px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+  }
+`;
+
+const SiteSlotForm = styled.form`
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+
+  > p {
+    min-height: 34px;
+    margin: 0;
+    color: rgba(17, 17, 15, 0.53);
+    font-size: 10px;
+    line-height: 1.55;
+  }
+`;
+
+const SiteSlotActions = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+`;
+
+const ChosenFile = styled.span`
+  overflow: hidden;
+  color: rgba(17, 17, 15, 0.48);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+const AccountIdentity = styled.div`
+  min-width: 220px;
+  padding: 16px 18px;
+  border: 1px solid rgba(17, 17, 15, 0.14);
+  text-align: right;
+
+  span,
+  strong,
+  small {
+    display: block;
+  }
+
+  span {
+    font: 400 18px/1 Georgia, 'Times New Roman', serif;
+  }
+
+  strong {
+    margin-top: 8px;
+    color: rgba(17, 17, 15, 0.5);
+    font-size: 9px;
+    font-weight: 400;
+  }
+
+  small {
+    margin-top: 12px;
+    color: #c54a2c;
+    font-size: 7px;
+    font-weight: 800;
+    letter-spacing: 0.15em;
+  }
+
+  @media (max-width: 720px) {
+    text-align: left;
+  }
+`;
+
+const AccountGrid = styled.div`
+  display: grid;
+  margin-top: 30px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+
+  @media (max-width: 800px) {
+    grid-template-columns: 1fr;
+  }
+`;
+
+const AccountCard = styled.section`
+  border: 1px solid rgba(17, 17, 15, 0.14);
+  background: rgba(255, 255, 255, 0.25);
+`;
+
+const AccountForm = styled.form`
+  display: grid;
+  gap: 18px;
+  padding: clamp(20px, 3vw, 34px);
+`;
+
+const AccessManagerCard = styled.section`
+  margin-top: 16px;
+  border: 1px solid rgba(17, 17, 15, 0.14);
+  background: rgba(255, 255, 255, 0.25);
+`;
+
+const AccessManagerTop = styled.header`
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 30px;
+  padding: clamp(24px, 4vw, 42px);
+  border-bottom: 1px solid rgba(17, 17, 15, 0.12);
+
+  h3 {
+    margin: 11px 0 12px;
+    font: 400 clamp(28px, 4vw, 46px) / 0.98 Georgia, 'Times New Roman',
+      serif;
+    letter-spacing: -0.045em;
+  }
+
+  p {
+    max-width: 650px;
+    margin: 0;
+    color: rgba(17, 17, 15, 0.53);
+    font-size: 12px;
+    line-height: 1.65;
+  }
+
+  @media (max-width: 850px) {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+`;
+
+const AccessCounts = styled.div`
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+
+  span {
+    display: grid;
+    min-width: 74px;
+    gap: 8px;
+    padding: 13px;
+    border: 1px solid rgba(17, 17, 15, 0.13);
+    color: rgba(17, 17, 15, 0.45);
+    font-size: 7px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  strong {
+    color: #11110f;
+    font: 400 24px/1 Georgia, 'Times New Roman', serif;
+  }
+
+  @media (max-width: 430px) {
+    width: 100%;
+
+    span {
+      min-width: 0;
+      flex: 1;
+    }
+  }
+`;
+
+const AccessToolbar = styled.div`
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px clamp(20px, 4vw, 42px);
+  border-bottom: 1px solid rgba(17, 17, 15, 0.1);
+
+  @media (max-width: 600px) {
+    align-items: stretch;
+    flex-direction: column;
+  }
+`;
+
+const AccessSearch = styled.div`
+  width: min(100%, 410px);
+
+  label {
+    display: block;
+    margin-bottom: 8px;
+    color: rgba(17, 17, 15, 0.52);
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  input {
+    box-sizing: border-box;
+    width: 100%;
+    height: 44px;
+    padding: 0 14px;
+    border: 1px solid rgba(17, 17, 15, 0.16);
+    outline: none;
+    background: rgba(255, 255, 255, 0.38);
+    color: #11110f;
+    font-size: 12px;
+
+    &:focus {
+      border-color: #c54a2c;
+      background: rgba(255, 255, 255, 0.68);
+    }
+  }
+
+  @media (max-width: 600px) {
+    width: 100%;
+  }
+`;
+
+const AccessRefreshButton = styled.button`
+  height: 44px;
+  padding: 0 17px;
+  border: 1px solid rgba(17, 17, 15, 0.2);
+  background: transparent;
+  color: #11110f;
+  cursor: pointer;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+
+  &:hover:not(:disabled) {
+    border-color: #c54a2c;
+    color: #c54a2c;
+  }
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.45;
+  }
+`;
+
+const AccessMessage = styled(FormMessage)`
+  margin: 16px clamp(20px, 4vw, 42px) 0;
+`;
+
+const UserAccessList = styled.div`
+  padding: 0 clamp(20px, 4vw, 42px);
+`;
+
+const UserAccessRow = styled.article`
+  display: grid;
+  grid-template-columns: 42px minmax(160px, 1fr) minmax(285px, auto) 130px;
+  align-items: center;
+  gap: 18px;
+  min-height: 92px;
+  padding: 13px 0;
+  border-bottom: 1px solid rgba(17, 17, 15, 0.11);
+  opacity: ${({ $disabled }) => ($disabled ? 0.58 : 1)};
+
+  @media (max-width: 1000px) {
+    grid-template-columns: 42px 1fr auto;
+
+    > div:nth-child(3) {
+      grid-column: 2 / -1;
+    }
+  }
+
+  @media (max-width: 650px) {
+    grid-template-columns: 38px 1fr;
+    gap: 12px;
+    padding: 18px 0;
+
+    > div:nth-child(3),
+    > div:nth-child(4) {
+      grid-column: 1 / -1;
+    }
+  }
+`;
+
+const UserAvatar = styled.div`
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 50%;
+  background: #11110f;
+  color: #f5f1e8;
+  font: 400 18px/1 Georgia, 'Times New Roman', serif;
+
+  @media (max-width: 650px) {
+    width: 38px;
+    height: 38px;
+  }
+`;
+
+const UserAccessIdentity = styled.div`
+  min-width: 0;
+
+  > span,
+  > small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  > span {
+    margin-top: 5px;
+    color: rgba(17, 17, 15, 0.58);
+    font-size: 10px;
+  }
+
+  > small {
+    margin-top: 7px;
+    color: rgba(17, 17, 15, 0.34);
+    font-size: 8px;
+  }
+`;
+
+const UserNameLine = styled.div`
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+
+  strong {
+    font: 400 16px/1.1 Georgia, 'Times New Roman', serif;
+  }
+`;
+
+const UserTag = styled.span`
+  padding: 3px 5px;
+  background: ${({ $owner }) =>
+    $owner ? 'rgba(197, 74, 44, 0.12)' : 'rgba(17, 17, 15, 0.07)'};
+  color: ${({ $owner }) => ($owner ? '#a43a23' : 'rgba(17, 17, 15, 0.5)')};
+  font-size: 6px;
+  font-weight: 900;
+  letter-spacing: 0.11em;
+`;
+
+const RolePicker = styled.div`
+  display: grid;
+  grid-template-columns: repeat(3, minmax(80px, 1fr));
+  padding: 3px;
+  border: 1px solid rgba(17, 17, 15, 0.14);
+  background: rgba(17, 17, 15, 0.035);
+
+  @media (max-width: 650px) {
+    grid-template-columns: repeat(3, 1fr);
+  }
+`;
+
+const RoleButton = styled.button`
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 0;
+  background: ${({ $active }) => ($active ? '#11110f' : 'transparent')};
+  color: ${({ $active }) =>
+    $active ? '#f5f1e8' : 'rgba(17, 17, 15, 0.54)'};
+  cursor: pointer;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
+
+  &:hover:not(:disabled) {
+    color: ${({ $active }) => ($active ? '#f5f1e8' : '#c54a2c')};
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: ${({ $active }) => ($active ? 1 : 0.42)};
+  }
+`;
+
+const AccessState = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(17, 17, 15, 0.42);
+  font-size: 8px;
+  line-height: 1.35;
+
+  i {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: ${({ $level }) =>
+      $level === 'none'
+        ? '#a9a398'
+        : $level === 'admin'
+          ? '#c54a2c'
+          : '#427052'};
+  }
+
+  @media (max-width: 650px) {
+    justify-content: flex-end;
+  }
+`;
+
+const AccessLoading = styled.div`
+  display: flex;
+  min-height: 150px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: rgba(17, 17, 15, 0.45);
+  font-size: 10px;
+
+  i {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #c54a2c;
+    animation: ${pulse} 1.2s ease-in-out infinite;
+  }
+`;
+
+const AccessEmpty = styled.p`
+  min-height: 110px;
+  margin: 0;
+  padding: 55px clamp(20px, 4vw, 42px);
+  color: rgba(17, 17, 15, 0.45);
+  font-size: 11px;
+  text-align: center;
+`;
+
+const AccessFootnote = styled.p`
+  margin: 0;
+  padding: 17px clamp(20px, 4vw, 42px);
+  border-top: 1px solid rgba(17, 17, 15, 0.1);
+  background: rgba(17, 17, 15, 0.035);
+  color: rgba(17, 17, 15, 0.48);
+  font-size: 9px;
+  line-height: 1.6;
+
+  strong {
+    margin-right: 7px;
+    color: #11110f;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+`;
+
+const PasswordTools = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 7px;
+
+  button {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: #c54a2c;
+    cursor: pointer;
+    font-size: 8px;
+    font-weight: 700;
+    text-decoration: underline;
+  }
+
+  span {
+    color: rgba(17, 17, 15, 0.4);
+    font-size: 8px;
+    text-align: right;
+  }
+`;
+
+const PermissionCard = styled.section`
+  display: flex;
+  min-height: 340px;
+  justify-content: center;
+  flex-direction: column;
+  padding: clamp(28px, 5vw, 55px);
+  border: 1px solid rgba(17, 17, 15, 0.14);
+  background: #dcd8cd;
+
+  > span {
+    color: #c54a2c;
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 0.16em;
+  }
+
+  h3 {
+    max-width: 420px;
+    margin: 18px 0;
+    font: 400 clamp(28px, 4vw, 44px) / 1 Georgia, 'Times New Roman', serif;
+    letter-spacing: -0.04em;
+  }
+
+  p {
+    max-width: 460px;
+    margin: 0;
+    color: rgba(17, 17, 15, 0.55);
+    font-size: 12px;
+    line-height: 1.6;
   }
 `;

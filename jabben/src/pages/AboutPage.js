@@ -271,18 +271,11 @@ const steps = [
 ];
 
 export function AboutPage() {
-  const { photos } = useGallery();
+  const { getSiteImage } = useGallery();
   const visualPhotos = [
-    photos.find((photo) => photo.title === 'Billie Eilish'),
-    {
-      id: 'julian-bjorgen',
-      url: 'https://static.wixstatic.com/media/29cc10_d487fce3e74d4833be0509abcb11b31e~mv2.png/v1/fit/w_1200,h_1400,q_90/julian-bjorgen.png',
-      alt: 'Julian Bjørgen in front of the camera.',
-      width: 986,
-      height: 666,
-      portrait: true,
-    },
-    photos.find((photo) => photo.title === 'Coldplay'),
+    getSiteImage('aboutLeft'),
+    getSiteImage('aboutPortrait'),
+    getSiteImage('aboutRight'),
   ].filter(Boolean);
 
   return (
@@ -312,6 +305,7 @@ export function AboutPage() {
               width={photo.width}
               height={photo.height}
               loading="lazy"
+              style={{ objectPosition: photo.position }}
             />
           </figure>
         ))}

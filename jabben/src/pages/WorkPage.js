@@ -98,18 +98,26 @@ const Filters = styled.div`
   }
 `;
 
+const photoArtist = (photo) =>
+  String(photo.artist || photo.title || '').trim();
+
 export function WorkPage() {
   const { photos, status } = useGallery();
   const [filter, setFilter] = useState('All');
   const [activePhoto, setActivePhoto] = useState(null);
-  const categories = useMemo(
-    () => ['All', ...new Set(photos.map((photo) => photo.category).filter(Boolean))],
+  const artists = useMemo(
+    () => ['All', ...new Set(photos.map(photoArtist).filter(Boolean))],
     [photos],
   );
   const visiblePhotos =
     filter === 'All'
       ? photos
-      : photos.filter((photo) => photo.category === filter);
+      : photos.filter((photo) => photoArtist(photo) === filter);
+
+  const chooseArtist = (artist) => {
+    setFilter(artist);
+    setActivePhoto(null);
+  };
 
   return (
     <Page id="main-content">
@@ -125,15 +133,15 @@ export function WorkPage() {
         </p>
       </Masthead>
       <Toolbar>
-        <Filters aria-label="Filter the portfolio">
-          {categories.map((category) => (
+        <Filters aria-label="Filter the portfolio by artist">
+          {artists.map((artist) => (
             <button
-              key={category}
+              key={artist}
               type="button"
-              aria-pressed={filter === category}
-              onClick={() => setFilter(category)}
+              aria-pressed={filter === artist}
+              onClick={() => chooseArtist(artist)}
             >
-              {category}
+              {artist}
             </button>
           ))}
         </Filters>

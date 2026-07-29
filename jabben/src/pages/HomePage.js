@@ -185,42 +185,6 @@ const Ticker = styled.div`
   }
 `;
 
-const PaperSection = styled.section`
-  padding: clamp(6rem, 12vw, 12rem) var(--page-gutter);
-  background: ${theme.colors.paper};
-  color: ${theme.colors.ink};
-`;
-
-const Manifest = styled.div`
-  display: grid;
-  grid-template-columns: minmax(8rem, 0.25fr) minmax(0, 1fr);
-  gap: clamp(2rem, 6vw, 8rem);
-  max-width: var(--max-width);
-  margin: 0 auto;
-
-  small {
-    font: 600 0.68rem/1.5 ${theme.fonts.mono};
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-  }
-
-  p {
-    max-width: 77rem;
-    margin: 0;
-    font: 400 clamp(2.4rem, 5.8vw, 6.5rem) / 0.98 ${theme.fonts.display};
-    letter-spacing: -0.04em;
-  }
-
-  em {
-    color: ${theme.colors.orangeDark};
-    font-weight: inherit;
-  }
-
-  @media (max-width: 42rem) {
-    grid-template-columns: 1fr;
-  }
-`;
-
 const WorkSection = styled.section`
   padding: clamp(6rem, 12vw, 12rem) var(--page-gutter);
   background: ${theme.colors.night};
@@ -249,68 +213,10 @@ const TextLink = styled(Link)`
   }
 `;
 
-const Services = styled.section`
-  padding: clamp(6rem, 12vw, 12rem) var(--page-gutter);
-  background: ${theme.colors.paper};
-  color: ${theme.colors.ink};
-`;
-
-const ServiceList = styled.div`
-  max-width: var(--max-width);
-  margin: 0 auto;
-  border-top: 1px solid ${theme.colors.lineDark};
-`;
-
-const ServiceRow = styled.div`
-  display: grid;
-  align-items: center;
-  grid-template-columns: 4rem minmax(0, 1fr) minmax(14rem, 0.45fr);
-  gap: 1.5rem;
-  min-height: clamp(7rem, 12vw, 11rem);
-  border-bottom: 1px solid ${theme.colors.lineDark};
-
-  small {
-    font: 500 0.65rem/1 ${theme.fonts.mono};
-  }
-
-  h3 {
-    margin: 0;
-    font: 400 clamp(2.4rem, 5.2vw, 5.8rem) / 0.9 ${theme.fonts.display};
-  }
-
-  p {
-    margin: 0;
-    color: #5e5a53;
-  }
-
-  @media (max-width: 42rem) {
-    grid-template-columns: 2.5rem 1fr;
-    padding: 1.5rem 0;
-
-    p {
-      grid-column: 2;
-    }
-  }
-`;
-
-const services = [
-  {
-    title: 'Concerts',
-    text: 'Energy, light and life on stage — without missing what happens between the songs.',
-  },
-  {
-    title: 'Portraits',
-    text: 'Portraits with personality, confidence and a visual language that actually feels like you.',
-  },
-  {
-    title: 'Film & design',
-    text: 'Moving images, campaign work and visual identities that tell one coherent story.',
-  },
-];
-
 export function HomePage() {
-  const { photos } = useGallery();
+  const { getSiteImage, photos } = useGallery();
   const [activePhoto, setActivePhoto] = useState(null);
+  const heroImage = getSiteImage('homeHero');
   const featured = photos.filter((photo) => photo.featured);
   const selected = featured.length >= 6 ? featured : photos;
   const tickerItems = [
@@ -326,10 +232,14 @@ export function HomePage() {
       <Hero id="main-content">
         <HeroImage>
           <img
-            src="/images/julian-bjorgen-hero.png"
-            alt="An artist standing in warm stage light in front of a concert crowd."
-            width="1536"
-            height="1024"
+            src={heroImage?.url || '/images/julian-bjorgen-hero.png'}
+            alt={
+              heroImage?.alt ||
+              'An artist standing in warm stage light in front of a concert crowd.'
+            }
+            width={heroImage?.width || 1536}
+            height={heroImage?.height || 1024}
+            style={{ objectPosition: heroImage?.position || '20% 50%' }}
             fetchPriority="high"
           />
         </HeroImage>
@@ -359,17 +269,6 @@ export function HomePage() {
         ))}
       </Ticker>
 
-      <PaperSection>
-        <Manifest>
-          <small>( The point of view )</small>
-          <p>
-            I look for the second before the roar, the light that lands just
-            right, and the expression that can never be repeated.{' '}
-            <em>That is where the photograph lives.</em>
-          </p>
-        </Manifest>
-      </PaperSection>
-
       <WorkSection>
         <SectionIntro eyebrow="01 / Selected work" dark>
           Turn it up. <em>Stay still.</em>
@@ -381,21 +280,6 @@ export function HomePage() {
           </TextLink>
         </WorkFooter>
       </WorkSection>
-
-      <Services>
-        <SectionIntro eyebrow="02 / Services">
-          From stage to <em>story.</em>
-        </SectionIntro>
-        <ServiceList>
-          {services.map((service, index) => (
-            <ServiceRow key={service.title}>
-              <small>0{index + 1}</small>
-              <h3>{service.title}</h3>
-              <p>{service.text}</p>
-            </ServiceRow>
-          ))}
-        </ServiceList>
-      </Services>
 
       {activePhoto && (
         <Lightbox

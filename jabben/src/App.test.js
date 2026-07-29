@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { App } from './App';
 
 beforeEach(() => {
@@ -11,8 +11,15 @@ test('renders the Julian Bjørgen identity and primary navigation', async () => 
   expect(
     await screen.findByRole('link', { name: /julian bjørgen – home/i }),
   ).toBeInTheDocument();
-  expect(screen.getByRole('link', { name: 'Work' })).toBeInTheDocument();
-  expect(screen.getByRole('link', { name: 'Contact' })).toBeInTheDocument();
+  const primaryNavigation = screen.getByRole('navigation', {
+    name: 'Hovedmeny',
+  });
+  expect(
+    within(primaryNavigation).getByRole('link', { name: 'Work' }),
+  ).toBeInTheDocument();
+  expect(
+    within(primaryNavigation).getByRole('link', { name: 'Contact' }),
+  ).toBeInTheDocument();
 });
 
 test('renders the private Studio route shell', async () => {
@@ -22,6 +29,23 @@ test('renders the private Studio route shell', async () => {
   expect(
     await screen.findByRole('link', {
       name: /julian bjørgen .* return to the home page/i,
-    }),
+    }, { timeout: 5000 }),
   ).toBeInTheDocument();
+});
+
+test('filters the portfolio by artist', async () => {
+  window.history.pushState({}, '', '/work');
+  render(<App />);
+
+  const edSheeranFilter = await screen.findByRole('button', {
+    name: 'Ed Sheeran',
+  });
+  fireEvent.click(edSheeranFilter);
+
+  expect(
+    screen.getByRole('button', { name: 'Open photograph: Ed Sheeran' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('button', { name: 'Open photograph: Billie Eilish' }),
+  ).not.toBeInTheDocument();
 });
