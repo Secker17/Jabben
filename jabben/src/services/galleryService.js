@@ -12,15 +12,12 @@ import {
 } from 'firebase/firestore';
 import { auth, db, firebaseConfigured } from '../lib/firebase';
 import {
-  MAX_IMAGE_SIZE,
   mediaValidationError,
   normalizePosition,
   requireAuthenticatedMediaServices,
   uploadImageFile,
   validateImageFile,
 } from './mediaServiceUtils';
-
-export { MAX_IMAGE_SIZE };
 
 export const PHOTO_CATEGORIES = [
   'Portrait',

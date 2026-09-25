@@ -1,9 +1,8 @@
 import { auth, db, firebaseConfigured } from '../lib/firebase';
 
-export const MAX_IMAGE_SIZE = 15 * 1024 * 1024;
 export const MAX_STORED_IMAGE_SIZE = 650 * 1024;
 export const MAX_IMAGE_DATA_LENGTH = 900000;
-export const MAX_IMAGE_DIMENSION = 2400;
+export const MAX_IMAGE_DIMENSION = 2560;
 
 const ALLOWED_IMAGE_TYPES = new Set([
   'image/jpeg',
@@ -53,10 +52,6 @@ export function validateImageFile(file) {
 
   if (!Number.isFinite(file.size) || file.size <= 0) {
     throw mediaValidationError('The image file is empty or cannot be read.');
-  }
-
-  if (file.size > MAX_IMAGE_SIZE) {
-    throw mediaValidationError('The image must be no larger than 15 MB.');
   }
 
   return file;
@@ -298,8 +293,13 @@ const blobToDataUrl = (blob) =>
     reader.readAsDataURL(blob);
   });
 
-const compressionQualities = [0.86, 0.76, 0.66, 0.56, 0.46, 0.36, 0.28];
+// Keep a sensible quality floor. If an image is still too large, reducing its
+// pixel dimensions produces a cleaner result than keeping every pixel and
+// crushing the encoder quality (especially in dark concert photographs).
+const compressionQualities = [0.9, 0.86, 0.82, 0.78, 0.74, 0.7, 0.66];
 const outputContentTypes = ['image/webp', 'image/jpeg'];
+const MAX_RESIZE_ATTEMPTS = 10;
+const RESIZE_FACTOR = 0.88;
 
 export async function compressImageForFirestore(file, onProgress) {
   validateImageFile(file);
@@ -332,9 +332,15 @@ export async function compressImageForFirestore(file, onProgress) {
     let smallestBlob = null;
     let attempts = 0;
     const maximumAttempts =
-      outputContentTypes.length * compressionQualities.length * 8;
+      outputContentTypes.length *
+      compressionQualities.length *
+      MAX_RESIZE_ATTEMPTS;
 
-    for (let resizeAttempt = 0; resizeAttempt < 8; resizeAttempt += 1) {
+    for (
+      let resizeAttempt = 0;
+      resizeAttempt < MAX_RESIZE_ATTEMPTS;
+      resizeAttempt += 1
+    ) {
       for (const contentType of outputContentTypes) {
         renderToCanvas({
           canvas,
@@ -372,6 +378,8 @@ export async function compressImageForFirestore(file, onProgress) {
                 imageData,
                 width,
                 height,
+                originalWidth,
+                originalHeight,
                 contentType: blob.type,
                 size: blob.size,
                 originalSize: file.size,
@@ -381,8 +389,8 @@ export async function compressImageForFirestore(file, onProgress) {
         }
       }
 
-      width = Math.max(1, Math.round(width * 0.82));
-      height = Math.max(1, Math.round(height * 0.82));
+      width = Math.max(1, Math.round(width * RESIZE_FACTOR));
+      height = Math.max(1, Math.round(height * RESIZE_FACTOR));
     }
 
     throw compressionError(

@@ -11,7 +11,6 @@ import { useGallery } from '../context/GalleryContext';
 import { fallbackPhotos } from '../data/portfolio';
 import {
   deletePhoto,
-  MAX_IMAGE_SIZE,
   PHOTO_CATEGORIES,
   replacePhoto,
   subscribeToManagedPhotos,
@@ -25,6 +24,7 @@ import {
 
 const currentYear = new Date().getFullYear();
 const imageAccept = 'image/jpeg,image/png,image/webp,image/avif';
+const acceptedImageTypes = new Set(imageAccept.split(','));
 const studioSections = [
   { id: 'library', label: 'Image library', number: '01' },
   { id: 'upload', label: 'New upload', number: '02' },
@@ -86,12 +86,12 @@ const friendlyError = (error) => {
 };
 
 const validateImage = (file) => {
-  if (!file?.type || !file.type.startsWith('image/')) {
+  if (!file?.type || !acceptedImageTypes.has(file.type)) {
     return 'Choose an image in JPG, PNG, WebP, or AVIF format.';
   }
 
-  if (file.size > MAX_IMAGE_SIZE) {
-    return 'The image must be no larger than 15 MB.';
+  if (!Number.isFinite(file.size) || file.size <= 0) {
+    return 'The image file is empty or cannot be read.';
   }
 
   return '';
@@ -612,7 +612,7 @@ function FileDropzone({
             Choose image
           </ChooseFile>
           <small>
-            JPG, PNG, WEBP, or AVIF · max 15 MB · compressed for Firestore
+            JPG, PNG, WEBP, or AVIF · automatically resized and compressed
           </small>
         </EmptyDrop>
       )}

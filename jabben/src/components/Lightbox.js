@@ -6,34 +6,62 @@ const Backdrop = styled.div`
   position: fixed;
   z-index: 5000;
   inset: 0;
-  display: grid;
-  place-items: center;
-  padding: clamp(1rem, 3vw, 3rem);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding:
+    max(clamp(1rem, 3vw, 3rem), env(safe-area-inset-top))
+    max(clamp(1rem, 3vw, 3rem), env(safe-area-inset-right))
+    max(clamp(1rem, 3vw, 3rem), env(safe-area-inset-bottom))
+    max(clamp(1rem, 3vw, 3rem), env(safe-area-inset-left));
+  overflow: hidden;
   background: rgba(5, 5, 5, 0.96);
 `;
 
 const Figure = styled.figure`
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
-  gap: 1rem;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
   width: 100%;
   height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1rem;
   margin: 0;
-
-  img {
-    width: 100%;
-    height: 100%;
-    min-height: 0;
-    object-fit: contain;
-  }
 
   figcaption {
     display: flex;
+    flex: 0 0 auto;
     justify-content: space-between;
     gap: 1rem;
     font: 500 0.68rem/1.5 ${theme.fonts.mono};
     letter-spacing: 0.1em;
     text-transform: uppercase;
+  }
+`;
+
+const ImageStage = styled.div`
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+
+  img {
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    object-position: center;
+  }
+
+  @media (max-width: 40rem) {
+    margin-inline: -0.35rem;
   }
 `;
 
@@ -144,12 +172,15 @@ export function Lightbox({ photo, photos, onClose, onChange }) {
         </>
       )}
       <Figure>
-        <img
-          src={photo.url}
-          alt={photo.alt || ''}
-          width={photo.width || 1600}
-          height={photo.height || 2000}
-        />
+        <ImageStage>
+          <img
+            src={photo.url}
+            alt={photo.alt || ''}
+            width={photo.width || 1600}
+            height={photo.height || 2000}
+            decoding="async"
+          />
+        </ImageStage>
         <figcaption>
           <span>{photo.title}</span>
           <span>
