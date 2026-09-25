@@ -171,7 +171,6 @@ const MobilePanel = styled.div`
 
 const navItems = [
   { to: '/work', label: 'Work' },
-  { to: '/about', label: 'About' },
   { to: '/contact', label: 'Contact' },
 ];
 
@@ -179,7 +178,7 @@ export function SiteHeader() {
   const [open, setOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const location = useLocation();
-  const onLightBackground = ['/about', '/contact'].includes(location.pathname);
+  const onLightBackground = location.pathname === '/contact';
 
   useEffect(() => {
     setOpen(false);

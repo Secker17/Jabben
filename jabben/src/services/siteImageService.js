@@ -19,7 +19,6 @@ import {
 const fallbackPhoto = (id) =>
   fallbackPhotos.find((photo) => photo.id === id);
 const billieEilish = fallbackPhoto('08');
-const coldplay = fallbackPhoto('21');
 
 export const SITE_IMAGE_SLOTS = Object.freeze([
   Object.freeze({
@@ -32,40 +31,6 @@ export const SITE_IMAGE_SLOTS = Object.freeze([
     fallbackWidth: 1536,
     fallbackHeight: 1024,
     fallbackPosition: '20% 50%',
-  }),
-  Object.freeze({
-    id: 'aboutLeft',
-    label: 'About — left',
-    description: 'The first concert image in the About page image row.',
-    fallbackUrl: billieEilish?.thumbnailUrl || billieEilish?.url || '',
-    fallbackAlt: billieEilish?.alt || 'Billie Eilish performing live.',
-    fallbackPhotoId: '08',
-    fallbackWidth: billieEilish?.width,
-    fallbackHeight: billieEilish?.height,
-    fallbackPosition: billieEilish?.position || '50% 38%',
-  }),
-  Object.freeze({
-    id: 'aboutPortrait',
-    label: 'About — portrait',
-    description: 'The portrait in the middle of the About page image row.',
-    fallbackUrl:
-      'https://static.wixstatic.com/media/29cc10_d487fce3e74d4833be0509abcb11b31e~mv2.png/v1/fit/w_1200,h_1400,q_90/julian-bjorgen.png',
-    fallbackAlt: 'Julian Bjørgen in front of the camera.',
-    fallbackWidth: 986,
-    fallbackHeight: 666,
-    fallbackPosition: 'center bottom',
-    portrait: true,
-  }),
-  Object.freeze({
-    id: 'aboutRight',
-    label: 'About — right',
-    description: 'The final concert image in the About page image row.',
-    fallbackUrl: coldplay?.thumbnailUrl || coldplay?.url || '',
-    fallbackAlt: coldplay?.alt || 'Coldplay performing live.',
-    fallbackPhotoId: '21',
-    fallbackWidth: coldplay?.width,
-    fallbackHeight: coldplay?.height,
-    fallbackPosition: coldplay?.position || '50% 50%',
   }),
   Object.freeze({
     id: 'studioLogin',

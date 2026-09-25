@@ -1537,7 +1537,7 @@ function SiteImagesPanel() {
           <Eyebrow>Site image manager</Eyebrow>
           <SectionTitle>Every fixed image, in one place</SectionTitle>
           <SectionCopy>
-            Replace hero, About, and Studio imagery without editing code. Each
+            Replace home and Studio imagery without editing code. Each
             slot shows where the image is used.
           </SectionCopy>
         </div>

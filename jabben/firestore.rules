@@ -160,8 +160,15 @@ service cloud.firestore {
           || (data.height is int && data.height > 0 && data.height <= 50000))
         && (!('originalSize' in data)
           || (data.originalSize is int
-            && data.originalSize > 0
-            && data.originalSize <= 15 * 1024 * 1024))
+            && data.originalSize > 0))
+        && (!('originalWidth' in data)
+          || (data.originalWidth is int
+            && data.originalWidth > 0
+            && data.originalWidth <= 100000))
+        && (!('originalHeight' in data)
+          || (data.originalHeight is int
+            && data.originalHeight > 0
+            && data.originalHeight <= 100000))
         && (!('sortOrder' in data)
           || data.sortOrder is int
           || data.sortOrder is float)
@@ -198,6 +205,8 @@ service cloud.firestore {
           'contentType',
           'size',
           'originalSize',
+          'originalWidth',
+          'originalHeight',
           'width',
           'height',
           'position',
@@ -244,9 +253,6 @@ service cloud.firestore {
       let data = request.resource.data;
       return slotId in [
           'homeHero',
-          'aboutLeft',
-          'aboutPortrait',
-          'aboutRight',
           'studioLogin'
         ]
         && data.keys().hasAll([
@@ -271,6 +277,8 @@ service cloud.firestore {
           'contentType',
           'size',
           'originalSize',
+          'originalWidth',
+          'originalHeight',
           'width',
           'height',
           'uploadedBy',
@@ -299,8 +307,15 @@ service cloud.firestore {
         && data.size > 0
         && data.size <= 700 * 1024
         && (!('originalSize' in data)
-          || (data.originalSize is int && data.originalSize > 0
-            && data.originalSize <= 15 * 1024 * 1024))
+          || (data.originalSize is int && data.originalSize > 0))
+        && (!('originalWidth' in data)
+          || (data.originalWidth is int
+            && data.originalWidth > 0
+            && data.originalWidth <= 100000))
+        && (!('originalHeight' in data)
+          || (data.originalHeight is int
+            && data.originalHeight > 0
+            && data.originalHeight <= 100000))
         && (!('width' in data)
           || (data.width is int && data.width > 0 && data.width <= 50000))
         && (!('height' in data)

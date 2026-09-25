@@ -19,9 +19,6 @@ const HomePage = lazy(() =>
 const WorkPage = lazy(() =>
   import('./pages/WorkPage').then((module) => ({ default: module.WorkPage })),
 );
-const AboutPage = lazy(() =>
-  import('./pages/AboutPage').then((module) => ({ default: module.AboutPage })),
-);
 const ContactPage = lazy(() =>
   import('./pages/ContactPage').then((module) => ({
     default: module.ContactPage,
@@ -85,10 +82,8 @@ export function App() {
               <Route element={<PublicLayout />}>
                 <Route index element={<HomePage />} />
                 <Route path="work" element={<WorkPage />} />
-                <Route path="about" element={<AboutPage />} />
                 <Route path="contact" element={<ContactPage />} />
                 <Route path="arbeid" element={<Navigate to="/work" replace />} />
-                <Route path="om" element={<Navigate to="/about" replace />} />
                 <Route
                   path="kontakt"
                   element={<Navigate to="/contact" replace />}
